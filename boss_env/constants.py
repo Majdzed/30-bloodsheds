@@ -1,0 +1,130 @@
+"""Numeric game parameters. Mirrors SPEC.md. Change both together."""
+
+from dataclasses import dataclass
+
+# ---- Timing / world -------------------------------------------------------
+FPS = 60
+ARENA_W = 800.0
+N_FIGHTS = 30
+FRAME_SKIP = 4                 # agent acts every 4 frames (15 decisions/s)
+FIGHT_TIME_LIMIT_S = 90.0
+
+
+def sec(seconds: float) -> int:
+    """Seconds -> frames at FPS."""
+    return int(round(seconds * FPS))
+
+
+FIGHT_TIME_LIMIT_FRAMES = sec(FIGHT_TIME_LIMIT_S)
+
+# ---- Player ---------------------------------------------------------------
+BASE_HEARTS = 4
+MAX_HEARTS = 5                 # after the fight-5 health upgrade
+PLAYER_SPEED = 220.0           # u/s (proposed)
+
+STAMINA_MAX = 100.0
+STAMINA_REGEN_PER_S = 25.0
+STAMINA_REGEN_DELAY_S = 0.5
+ROLL_COST = 30.0
+ROLL_DURATION_S = 0.35         # (proposed)
+ROLL_DISTANCE = 120.0          # (proposed)
+ROLL_IFRAMES_S = 0.2           # (proposed)
+ROLL_COOLDOWN_S = 0.6          # (proposed)
+
+JUMP_AIRTIME_S = 0.6
+JUMP_APEX = 100.0
+
+PARRY_WINDOW_FRAMES = 12       # 0.2 s. Must exceed FRAME_SKIP (see SPEC.md).
+PARRY_COOLDOWN_S = 1.0
+SUPER_STACKS_REQUIRED = 3
+
+FLASK_HEAL_HEARTS = 2
+FLASK_DRINK_S = 0.6            # (proposed)
+
+
+def flasks_for_fight(fight: int, upgrade: str = "health") -> int:
+    """Flasks available at the start of a fight (1-indexed). upgrade: 'health' | 'flask'."""
+    n = 1 if fight <= 3 else 2
+    if fight >= 6 and upgrade == "flask":
+        n += 1
+    return n
+
+
+def max_hearts_for_fight(fight: int, upgrade: str = "health") -> int:
+    if fight >= 6 and upgrade == "health":
+        return BASE_HEARTS + 1
+    return BASE_HEARTS
+
+
+# ---- Weapons --------------------------------------------------------------
+@dataclass(frozen=True)
+class Weapon:
+    name: str
+    light_dmg: float
+    light_windup_s: float
+    light_range: float
+    light_recovery_s: float
+    heavy_dmg: float
+    heavy_windup_s: float
+    heavy_range: float
+    heavy_recovery_s: float
+    super_name: str
+    super_dmg: float
+    super_duration_s: float
+    uses_ammo: bool = False
+
+
+KATANA = Weapon(
+    name="katana",
+    light_dmg=15, light_windup_s=0.20, light_range=120, light_recovery_s=0.40,
+    heavy_dmg=35, heavy_windup_s=0.50, heavy_range=150, heavy_recovery_s=0.40,
+    super_name="Blood Katana", super_dmg=90, super_duration_s=0.8,
+)
+
+REVOLVER = Weapon(
+    name="revolver",
+    light_dmg=6, light_windup_s=0.15, light_range=ARENA_W, light_recovery_s=0.15,
+    heavy_dmg=18, heavy_windup_s=0.60, heavy_range=ARENA_W, heavy_recovery_s=0.25,
+    super_name="Ultra Plasma Shot", super_dmg=80, super_duration_s=0.4,
+    uses_ammo=True,
+)
+
+WEAPONS = {"katana": KATANA, "revolver": REVOLVER}
+
+REVOLVER_MAG = 6
+REVOLVER_HEAVY_COST = 2
+REVOLVER_RELOAD_S = 1.2        # (proposed)
+REVOLVER_IDLE_RELOAD_DELAY_S = 0.5
+
+# ---- Boss -----------------------------------------------------------------
+BOSS_SPEED = 120.0
+BOSS_GLOBAL_RECOVERY_S = 0.3   # (proposed)
+
+MELEE_TRIGGER_DIST = 100.0
+BLINK_MIN_DIST = 150.0
+BLINK_COOLDOWN_S = 8.0
+
+HEAL_ORB_COUNT = 4
+HEAL_ORB_INTERVAL_S = 0.75
+HEAL_PER_ORB = 15
+HEAL_TRIGGER_HP_FRACTION = 0.60  # (proposed)
+
+
+def boss_max_hp(fight: int) -> int:
+    """150 at fight 1, 350 at fight 15, 600 at fight 30, linear in between."""
+    if fight <= 15:
+        return round(150 + (fight - 1) * (350 - 150) / 14)
+    return round(350 + (fight - 15) * (600 - 350) / 15)
+
+
+# ---- Reward ---------------------------------------------------------------
+REWARD = {
+    "damage_dealt": 1.0,       # x (damage / boss max HP)
+    "heart_lost": -0.25,
+    "parry": 0.3,
+    "orb_destroyed": 0.1,
+    "heal_interrupted": 0.3,
+    "win": 1.0,
+    "loss": -1.0,              # also used for timeout
+    "step": -0.001,
+}

@@ -1,0 +1,22 @@
+[project]
+name = "boss-gauntlet-rl"
+version = "0.1.0"
+description = "A 30-fight boss gauntlet used as a Deep RL environment (Reinforcement Learning and Optimal Control project)."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=1.26",
+    "gymnasium>=0.29.1,<1.1",
+    "stable-baselines3>=2.4,<3",
+    "sb3-contrib>=2.4,<3",
+    "torch>=2.2",
+    "pygame>=2.5",
+    "pandas>=2.1",
+    "matplotlib>=3.8",
+    "tensorboard>=2.15",
+    "ipykernel>=6.29",
+    "notebook>=7.0",
+]
+
+[tool.uv]
+package = false
