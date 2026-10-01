@@ -1,5 +1,5 @@
 [project]
-name = "boss-gauntlet-rl"
+name = "30 bloodsheds"
 version = "0.1.0"
 description = "A 30-fight boss gauntlet used as a Deep RL environment (Reinforcement Learning and Optimal Control project)."
 readme = "README.md"
