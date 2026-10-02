@@ -73,11 +73,41 @@ def evaluate_policy(agent, env: BossFightEnv, n_episodes: int = 50, seed_start: 
     }
 
 
+def evaluate_gauntlet_run(agent, weapon: str = "katana", upgrade: str = "health", is_rl: bool = True, seed: int = 1000) -> int:
+    """Run a full 30-fight gauntlet attempt until defeat or completion.
+    
+    Returns the number of consecutive fights cleared.
+    """
+    cleared = 0
+    for fight in range(1, C.N_FIGHTS + 1):
+        env = BossFightEnv(weapon=weapon, fight=fight, upgrade=upgrade)
+        obs, _ = env.reset(seed=seed + fight * 100)
+        term = False
+        trunc = False
+
+        while not (term or trunc):
+            mask = env.action_masks()
+            if is_rl:
+                action, _ = agent.predict(obs, action_masks=mask, deterministic=True)
+            else:
+                action, _ = agent.predict(obs, mask=mask)
+
+            obs, _, term, trunc, info = env.step(action)
+
+        if info.get("win", False):
+            cleared += 1
+        else:
+            break
+    return cleared
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate RL agent vs Rule-Based agent")
     parser.add_argument("--fights", type=int, nargs="+", default=[1, 4], help="Fights to evaluate on")
     parser.add_argument("--episodes", type=int, default=50, help="Episodes per fight")
     parser.add_argument("--weapon", type=str, default="katana", choices=["katana", "revolver"])
+    parser.add_argument("--upgrade", type=str, default="health", choices=["health", "flask"])
+    parser.add_argument("--gauntlet-runs", type=int, default=0, help="Number of 30-fight gauntlet endurance runs to test")
     parser.add_argument("--model", type=str, default="", help="Path to RL model .zip")
     parser.add_argument("--out-dir", type=str, default="results", help="Directory to save CSV report")
     args = parser.parse_args()
@@ -106,7 +136,7 @@ def main():
     print("-" * 90)
 
     for fight in args.fights:
-        env = BossFightEnv(weapon=args.weapon, fight=fight)
+        env = BossFightEnv(weapon=args.weapon, fight=fight, upgrade=args.upgrade)
 
         # Evaluate Rule-Based
         res_rule = evaluate_policy(rule_agent, env, n_episodes=args.episodes, seed_start=5000 + fight, is_rl=False)
@@ -130,6 +160,25 @@ def main():
             print(f"Fight {fight:<2} | {'MaskablePPO':<16} | {res_rl['win_rate']:>8.1f}% | {res_rl['mean_reward']:>9.3f} | {res_rl['mean_hearts_lost']:>12.2f} | {res_rl['mean_duration_s']:>7.2f}s | {res_rl['mean_damage']:>8.1f}")
 
         print("-" * 90)
+
+    # 3. Gauntlet Consecutive Clears Evaluation
+    if args.gauntlet_runs > 0:
+        print("\n" + "=" * 90)
+        print(f"GAUNTLET ENDURANCE EVALUATION ({args.gauntlet_runs} runs, weapon={args.weapon})")
+        print("=" * 90)
+        rule_clears = [
+            evaluate_gauntlet_run(rule_agent, weapon=args.weapon, upgrade=args.upgrade, is_rl=False, seed=9000 + i * 50)
+            for i in range(args.gauntlet_runs)
+        ]
+        print(f"Rule-Based Agent:   Avg Cleared: {np.mean(rule_clears):.1f}/30 | Max Cleared: {max(rule_clears)}/30 | Runs: {rule_clears}")
+
+        if rl_agent is not None:
+            rl_clears = [
+                evaluate_gauntlet_run(rl_agent, weapon=args.weapon, upgrade=args.upgrade, is_rl=True, seed=9000 + i * 50)
+                for i in range(args.gauntlet_runs)
+            ]
+            print(f"MaskablePPO Agent:  Avg Cleared: {np.mean(rl_clears):.1f}/30 | Max Cleared: {max(rl_clears)}/30 | Runs: {rl_clears}")
+        print("=" * 90)
 
     # Save to CSV
     csv_path = os.path.join(args.out_dir, f"eval_report_{int(time.time())}.csv")

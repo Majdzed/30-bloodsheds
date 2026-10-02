@@ -1,6 +1,6 @@
 """Pygame renderer for Boss Gauntlet.
 
-Renders player, boss, projectiles, telegraphs, and full HUD.
+Renders player, boss, projectiles, ability telegraphs, and full HUD.
 Only reads env state; never modifies it.
 """
 
@@ -44,22 +44,25 @@ class Renderer:
         if p is None or b is None:
             return
 
-        # 1. Background (Moonlit ancient courtyard)
+        now_ticks = pygame.time.get_ticks()
+
+        # -------------------------------------------------------------
+        # 1. Background (Moonlit gothic courtyard)
+        # -------------------------------------------------------------
         self.screen.fill((12, 14, 24))
 
         # Distant moon
         pygame.draw.circle(self.screen, (230, 235, 245), (1020, 130), 55)
         pygame.draw.circle(self.screen, (12, 14, 24), (1050, 120), 50)  # crescent shadow
 
-        # Distant gothic skyline silhouette
+        # Gothic skyline silhouette
         city_color = (20, 22, 38)
         pygame.draw.rect(self.screen, city_color, (0, 360, self.width, 180))
-        # Towers
         for tx, tw, th in [(80, 70, 160), (220, 50, 110), (340, 90, 140), (860, 60, 130), (1080, 80, 170)]:
             pygame.draw.rect(self.screen, city_color, (tx, 360 - th, tw, th))
             pygame.draw.polygon(self.screen, city_color, [(tx, 360 - th), (tx + tw // 2, 360 - th - 40), (tx + tw, 360 - th)])
 
-        # Courtyard floor
+        # Floor
         floor_rect = pygame.Rect(0, self.ground_y, self.width, self.height - self.ground_y)
         pygame.draw.rect(self.screen, (32, 35, 48), floor_rect)
         pygame.draw.line(self.screen, (60, 65, 85), (0, self.ground_y), (self.width, self.ground_y), 3)
@@ -68,27 +71,53 @@ class Renderer:
         pillar_w = 20
         pygame.draw.rect(self.screen, (55, 60, 80), (self.arena_left - pillar_w, 200, pillar_w, self.ground_y - 200))
         pygame.draw.rect(self.screen, (55, 60, 80), (self.arena_right, 200, pillar_w, self.ground_y - 200))
-        # Wall highlight lines
         pygame.draw.line(self.screen, (100, 110, 140), (self.arena_left, 200), (self.arena_left, self.ground_y), 2)
         pygame.draw.line(self.screen, (100, 110, 140), (self.arena_right, 200), (self.arena_right, self.ground_y), 2)
 
-        # 2. Boss Rendering
+        # -------------------------------------------------------------
+        # 2. Hazards & Boss Ability Ground Telegraphs
+        # -------------------------------------------------------------
+        # 2A. Dark Spikes (Ability 2)
+        if env._spike_timer > 0:
+            sp_x, sp_y = self.world_to_screen(env._spike_x, 0.0)
+            sp_radius = int(70 * self.scale)  # 140u diameter
+            spike_surf = pygame.Surface((sp_radius * 2, 30), pygame.SRCALPHA)
+            # Pulsing warning ellipse on ground
+            alpha = int(120 + 80 * math.sin(now_ticks * 0.03))
+            pygame.draw.ellipse(spike_surf, (180, 30, 220, alpha), (0, 0, sp_radius * 2, 30))
+            self.screen.blit(spike_surf, (sp_x - sp_radius, sp_y - 15))
+        elif env._spike_active_timer > 0:
+            # Spikes erupting from the ground!
+            sp_x, sp_y = self.world_to_screen(env._spike_x, 0.0)
+            sp_radius = int(70 * self.scale)
+            for ox in range(-sp_radius + 10, sp_radius - 10, 20):
+                spike_h = int(60 + 20 * math.sin(ox))
+                pygame.draw.polygon(
+                    self.screen,
+                    (220, 40, 240),
+                    [(sp_x + ox - 8, sp_y), (sp_x + ox, sp_y - spike_h), (sp_x + ox + 8, sp_y)]
+                )
+
+        # -------------------------------------------------------------
+        # 3. Boss Rendering
+        # -------------------------------------------------------------
         bsx, bsy = self.world_to_screen(b.x, 0.0)
         bw, bh = 54, 96
         boss_rect = pygame.Rect(bsx - bw // 2, bsy - bh, bw, bh)
 
-        # Boss telegraph aura / windup
+        # Windup aura
         if b.state == BossState.WINDUP:
-            aura_radius = int(60 + 10 * math.sin(pygame.time.get_ticks() * 0.02))
+            aura_radius = int(60 + 10 * math.sin(now_ticks * 0.02))
             aura_surf = pygame.Surface((aura_radius * 2, aura_radius * 2), pygame.SRCALPHA)
-            pygame.draw.circle(aura_surf, (255, 50, 50, 70), (aura_radius, aura_radius), aura_radius)
+            color = (255, 50, 50, 70) if b.current_ability_id in (1, 7) else (180, 50, 255, 70)
+            pygame.draw.circle(aura_surf, color, (aura_radius, aura_radius), aura_radius)
             self.screen.blit(aura_surf, (bsx - aura_radius, bsy - bh // 2 - aura_radius))
-            # Windup telegraph arc on ground for Lightning Strike
-            if b.current_ability_id == 1:
+            # Melee warning arc
+            if b.current_ability_id in (1, 7):
                 arc_w = int(120 * self.scale)
                 arc_dir = 1 if p.x > b.x else -1
-                arc_rect = pygame.Rect(bsx if arc_dir > 0 else bsx - arc_w, bsy - 20, arc_w, 20)
-                pygame.draw.rect(self.screen, (255, 60, 60, 100), arc_rect, border_radius=4)
+                arc_rect = pygame.Rect(bsx if arc_dir > 0 else bsx - arc_w, bsy - 15, arc_w, 15)
+                pygame.draw.rect(self.screen, (255, 60, 60, 110), arc_rect, border_radius=4)
 
         # Boss color
         if b.state == BossState.STUN:
@@ -97,6 +126,8 @@ class Renderer:
             b_color = (230, 40, 60)
         elif b.state == BossState.WINDUP:
             b_color = (190, 50, 80)
+        elif b.state == BossState.HEAL:
+            b_color = (50, 200, 120)
         else:
             b_color = (130, 40, 150)
 
@@ -106,28 +137,76 @@ class Renderer:
         # Boss eyes
         eye_dir = 1 if p.x > b.x else -1
         eye_x = bsx + eye_dir * 12
-        pygame.draw.circle(self.screen, (255, 230, 80), (eye_x, bsy - bh + 25), 4)
+        eye_color = (255, 230, 80) if b.state != BossState.STUN else (70, 70, 70)
+        pygame.draw.circle(self.screen, eye_color, (eye_x, bsy - bh + 25), 4)
 
-        # Boss Attack visual slash
-        if b.state == BossState.ATTACK and b.current_ability_id == 1:
-            slash_len = int(120 * self.scale)
+        # Boss Melee / Frenzy slash visuals
+        if b.state == BossState.ATTACK:
+            slash_len = int(130 * self.scale)
             slash_dir = 1 if p.x > b.x else -1
-            slash_color = (255, 220, 100)
+            slash_color = (255, 80, 80) if b.current_ability_id == 7 else (255, 220, 100)
             pygame.draw.arc(
                 self.screen,
                 slash_color,
                 pygame.Rect(bsx - slash_len if slash_dir < 0 else bsx, bsy - bh, slash_len, bh),
                 0 if slash_dir > 0 else math.pi / 2,
                 math.pi / 2 if slash_dir > 0 else math.pi,
-                6,
+                7 if b.current_ability_id == 7 else 5,
             )
 
-        # 3. Player Rendering
+        # -------------------------------------------------------------
+        # 4. Projectiles and Special Hazards
+        # -------------------------------------------------------------
+        # 4A. Siphon Heal Orbs (Ability 5)
+        for ox in env._heal_orbs:
+            orb_sx, _ = self.world_to_screen(ox, 0.0)
+            orb_sy = bsy - bh // 2 + int(18 * math.sin(now_ticks * 0.01 + ox))
+            # Glowing green health sphere
+            pygame.draw.circle(self.screen, (80, 255, 140), (orb_sx, orb_sy), 12)
+            pygame.draw.circle(self.screen, (200, 255, 220), (orb_sx, orb_sy), 6)
+            pygame.draw.circle(self.screen, (20, 120, 60), (orb_sx, orb_sy), 12, 2)
+
+        # 4B. Dark Wave (Ability 3)
+        for wave in env._dark_waves:
+            wx, wy = self.world_to_screen(wave["x"], 0.0)
+            wdir = wave["dir"]
+            # Dark creeping ground wave
+            wave_pts = [
+                (wx - wdir * 25, wy),
+                (wx, wy - 30),
+                (wx + wdir * 15, wy),
+            ]
+            pygame.draw.polygon(self.screen, (160, 40, 220), wave_pts)
+            pygame.draw.polygon(self.screen, (220, 120, 255), wave_pts, 2)
+
+        # 4C. Light Bolt (Ability 4)
+        for bolt in env._light_bolts:
+            bx, by = self.world_to_screen(bolt["x"], 35.0)
+            b_dir = bolt["dir"]
+            pygame.draw.ellipse(self.screen, (255, 235, 120), (bx - 14, by - 6, 28, 12))
+            pygame.draw.circle(self.screen, (255, 255, 230), (int(bx + b_dir * 8), int(by)), 5)
+            tail_x = int(bx - b_dir * 30)
+            pygame.draw.line(self.screen, (255, 190, 60), (bx, by), (tail_x, by), 3)
+
+        # 4D. Ultimate Dark Orb (Ability 6)
+        for orb in env._dark_orbs:
+            ox, _ = self.world_to_screen(orb["x"], 0.0)
+            # Arena-height towering sphere
+            orb_radius = int(85 * self.scale)
+            orb_surf = pygame.Surface((orb_radius * 2, self.height), pygame.SRCALPHA)
+            pygame.draw.circle(orb_surf, (80, 10, 110, 200), (orb_radius, self.ground_y // 2), orb_radius)
+            pygame.draw.circle(orb_surf, (220, 60, 255, 120), (orb_radius, self.ground_y // 2), orb_radius - 15)
+            pygame.draw.circle(orb_surf, (255, 255, 255, 230), (orb_radius, self.ground_y // 2), 20)
+            self.screen.blit(orb_surf, (ox - orb_radius, 0))
+
+        # -------------------------------------------------------------
+        # 5. Player Rendering
+        # -------------------------------------------------------------
         psx, psy = self.world_to_screen(p.x, p.y)
         pw, ph = 38, 74
         player_rect = pygame.Rect(psx - pw // 2, psy - ph, pw, ph)
 
-        # Invulnerability aura (Roll / Super)
+        # Invulnerability aura
         if p.iframes > 0:
             glow_surf = pygame.Surface((pw + 20, ph + 20), pygame.SRCALPHA)
             glow_color = (255, 60, 80, 120) if p.state == PlayerState.SUPER else (130, 220, 255, 100)
@@ -143,33 +222,53 @@ class Renderer:
             p_color = (240, 30, 60)
         elif p.state == PlayerState.ATTACK:
             p_color = (255, 150, 40)
+        elif p.state == PlayerState.DRINK:
+            p_color = (70, 220, 130)
         else:
             p_color = (70, 140, 230)
 
         pygame.draw.rect(self.screen, p_color, player_rect, border_radius=5)
         pygame.draw.rect(self.screen, (15, 25, 50), player_rect, width=2, border_radius=5)
 
-        # Player weapon slash visual
+        # Player attack visuals
+        facing_boss = 1 if b.x > p.x else -1
         if p.state == PlayerState.ATTACK:
-            range_u = env.weapon.light_range if p.pending_attack_id == 1 else env.weapon.heavy_range
-            slash_len = int(range_u * self.scale)
-            slash_dir = 1 if b.x > p.x else -1
-            end_x = psx + slash_dir * slash_len
-            sword_color = (255, 240, 180) if p.pending_attack_id == 2 else (200, 230, 255)
-            pygame.draw.line(self.screen, sword_color, (psx, psy - ph // 2), (end_x, psy - ph // 2 - 10), 5)
+            if env.weapon.uses_ammo:
+                # Revolver bullet tracers
+                shot_y = psy - ph // 2 - 5
+                if p.pending_attack_id == 2:
+                    # Piercing heavy shot: fullscreen cyan beam
+                    target_x = self.arena_right if facing_boss > 0 else self.arena_left
+                    pygame.draw.line(self.screen, (100, 240, 255), (psx, shot_y), (target_x, shot_y), 6)
+                    pygame.draw.line(self.screen, (255, 255, 255), (psx, shot_y), (target_x, shot_y), 2)
+                else:
+                    # Light attack bullet tracer
+                    target_x = self.arena_right if facing_boss > 0 else self.arena_left
+                    pygame.draw.line(self.screen, (255, 230, 100), (psx, shot_y), (target_x, shot_y), 3)
+            else:
+                # Katana sword slash
+                range_u = env.weapon.light_range if p.pending_attack_id == 1 else env.weapon.heavy_range
+                slash_len = int(range_u * self.scale)
+                end_x = psx + facing_boss * slash_len
+                sword_color = (255, 240, 180) if p.pending_attack_id == 2 else (200, 230, 255)
+                pygame.draw.line(self.screen, sword_color, (psx, psy - ph // 2), (end_x, psy - ph // 2 - 10), 5)
 
-        # 4. Projectiles (Light Bolt)
-        for bolt in env._light_bolts:
-            bx, by = self.world_to_screen(bolt["x"], 35.0)
-            b_dir = bolt["dir"]
-            # Draw glowing golden comet
-            pygame.draw.ellipse(self.screen, (255, 235, 120), (bx - 14, by - 6, 28, 12))
-            pygame.draw.circle(self.screen, (255, 255, 230), (int(bx + b_dir * 8), int(by)), 5)
-            # Trail
-            tail_x = int(bx - b_dir * 30)
-            pygame.draw.line(self.screen, (255, 190, 60), (bx, by), (tail_x, by), 3)
+        # Player Super visual
+        if p.state == PlayerState.SUPER:
+            if env.weapon.uses_ammo:
+                # Ultra Plasma Shot: giant fullscreen laser
+                beam_y = psy - ph // 2
+                pygame.draw.line(self.screen, (255, 80, 120), (0, beam_y), (self.width, beam_y), 28)
+                pygame.draw.line(self.screen, (255, 255, 255), (0, beam_y), (self.width, beam_y), 10)
+            else:
+                # Blood Katana: triple crimson slash arc
+                slash_reach = int(200 * self.scale)
+                arc_x = psx if facing_boss > 0 else psx - slash_reach
+                pygame.draw.arc(self.screen, (255, 30, 60), pygame.Rect(arc_x, psy - ph - 20, slash_reach, ph + 40), 0, math.pi, 8)
 
-        # 5. Full HUD Interface
+        # -------------------------------------------------------------
+        # 6. Full HUD Interface
+        # -------------------------------------------------------------
         self._draw_hud(env)
 
         pygame.display.flip()
@@ -180,24 +279,27 @@ class Renderer:
         b = env.boss
 
         # --- Boss HP Bar (Top Center) ---
-        bar_w, bar_h = 500, 24
+        bar_w, bar_h = 520, 24
         bar_x = (self.width - bar_w) // 2
         bar_y = 35
 
-        # Boss Name and Ability banner
         boss_title = f"VON VASTORIOUS (Fight {env.fight}/30)"
         txt_boss = self.font_main.render(boss_title, True, (240, 220, 230))
         self.screen.blit(txt_boss, (bar_x, bar_y - 24))
 
+        # Dynamic ability telegraph banner
         if b.state == BossState.WINDUP:
-            ab_name = "LIGHTNING STRIKE" if b.current_ability_id == 1 else "LIGHT BOLT"
+            ab_name = C.ABILITIES[b.current_ability_id - 1].name.upper() if b.current_ability_id > 0 else "ATTACK"
             txt_warn = self.font_main.render(f"! {ab_name} !", True, (255, 70, 70))
             self.screen.blit(txt_warn, (bar_x + bar_w - txt_warn.get_width(), bar_y - 24))
+        elif b.state == BossState.HEAL:
+            txt_heal = self.font_main.render("! SIPHON HEAL !", True, (80, 255, 140))
+            self.screen.blit(txt_heal, (bar_x + bar_w - txt_heal.get_width(), bar_y - 24))
         elif b.state == BossState.STUN:
             txt_stun = self.font_main.render("STUNNED!", True, (255, 220, 80))
             self.screen.blit(txt_stun, (bar_x + bar_w - txt_stun.get_width(), bar_y - 24))
 
-        # HP Bar Background & Fill
+        # Boss HP bar
         pygame.draw.rect(self.screen, (30, 20, 25), (bar_x - 2, bar_y - 2, bar_w + 4, bar_h + 4), border_radius=4)
         hp_frac = max(0.0, b.hp / b.max_hp)
         fill_w = int(bar_w * hp_frac)
@@ -216,12 +318,10 @@ class Renderer:
             hx = hud_x + i * 32
             hy = hud_y
             if i < p.hearts:
-                # Full red heart
                 pygame.draw.circle(self.screen, (230, 40, 50), (hx + 8, hy + 8), 7)
                 pygame.draw.circle(self.screen, (230, 40, 50), (hx + 20, hy + 8), 7)
                 pygame.draw.polygon(self.screen, (230, 40, 50), [(hx + 1, hy + 10), (hx + 27, hy + 10), (hx + 14, hy + 24)])
             else:
-                # Empty heart frame
                 pygame.draw.circle(self.screen, (70, 70, 80), (hx + 8, hy + 8), 7, 2)
                 pygame.draw.circle(self.screen, (70, 70, 80), (hx + 20, hy + 8), 7, 2)
                 pygame.draw.polygon(self.screen, (70, 70, 80), [(hx + 1, hy + 10), (hx + 27, hy + 10), (hx + 14, hy + 24)], 2)
@@ -253,15 +353,36 @@ class Renderer:
         txt_flasks = self.font_small.render(f"FLASKS: {p.flasks}", True, (80, 210, 120))
         self.screen.blit(txt_flasks, (hud_x, flask_y))
 
+        # Revolver Ammo HUD (if Revolver)
+        if env.weapon.uses_ammo:
+            ammo_y = flask_y + 22
+            txt_ammo = self.font_small.render("AMMO:", True, (240, 210, 90))
+            self.screen.blit(txt_ammo, (hud_x, ammo_y))
+            for b_idx in range(C.REVOLVER_MAG):
+                bx = hud_x + 60 + b_idx * 16
+                by = ammo_y + 2
+                has_bullet = b_idx < p.ammo
+                b_col = (255, 215, 60) if has_bullet else (60, 65, 75)
+                pygame.draw.rect(self.screen, b_col, (bx, by, 10, 14), border_radius=2)
+                pygame.draw.rect(self.screen, (160, 140, 50) if has_bullet else (40, 45, 55), (bx, by, 10, 14), 1, border_radius=2)
+
+            if p.reload_timer > 0:
+                rel_frac = 1.0 - (p.reload_timer / C.sec(C.REVOLVER_RELOAD_S))
+                rel_bar_w = 90
+                pygame.draw.rect(self.screen, (40, 45, 50), (hud_x + 60, ammo_y + 20, rel_bar_w, 6), border_radius=2)
+                pygame.draw.rect(self.screen, (100, 220, 255), (hud_x + 60, ammo_y + 20, int(rel_bar_w * rel_frac), 6), border_radius=2)
+
         # --- Timer (Top Right) ---
         time_left = max(0.0, C.FIGHT_TIME_LIMIT_S - (env._fight_frame / C.FPS))
         time_color = (255, 80, 80) if time_left < 15.0 else (220, 230, 240)
         txt_time = self.font_hud.render(f"TIME: {time_left:05.1f}s", True, time_color)
         self.screen.blit(txt_time, (self.width - txt_time.get_width() - 40, 35))
 
-        # --- Controls Reference (Bottom Center) ---
-        ctrl_text = "A/D: Move | W/Space: Jump | J: Light Attack | K: Heavy Attack | L: Roll | U: Parry | I: Blood Katana | R: Reset"
-        txt_ctrl = self.font_small.render(ctrl_text, True, (130, 140, 160))
+        # --- Weapon Name & Controls Footer (Bottom Center) ---
+        wpn_name = env.weapon.name
+        super_name = "Blood Katana" if not env.weapon.uses_ammo else "Ultra Plasma"
+        ctrl_text = f"[{wpn_name}] A/D: Move | W/Space: Jump | J: Light | K: Heavy | L: Roll | U: Parry | I: {super_name} | F: Flask"
+        txt_ctrl = self.font_small.render(ctrl_text, True, (140, 150, 175))
         self.screen.blit(txt_ctrl, ((self.width - txt_ctrl.get_width()) // 2, self.height - 30))
 
     def close(self):
