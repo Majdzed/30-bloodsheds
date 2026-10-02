@@ -128,3 +128,14 @@ REWARD = {
     "loss": -1.0,              # also used for timeout
     "step": -0.001,
 }
+# ---- Ability timing (frames). Mirrors SPEC.md §5 ability table. ----------
+# Keyed by ability id (1..7). All values in frames at FPS=60.
+ABILITY_FRAMES: dict = {
+    1: {"windup": sec(0.50), "active": sec(0.15), "cooldown": sec(2.0)},   # Lightning Strike
+    2: {"windup": sec(0.80), "active": sec(0.25), "cooldown": sec(5.0)},   # Dark Spikes
+    3: {"windup": sec(0.60), "active": 0,          "cooldown": sec(4.0)},   # Dark Wave (projectile)
+    4: {"windup": sec(0.30), "active": 0,          "cooldown": sec(2.0)},   # Light Bolt (projectile)
+    5: {"windup": sec(0.75), "active": sec(3.0),   "cooldown": sec(14.0)},  # Siphon Heal
+    6: {"windup": sec(1.20), "active": sec(2.0),   "cooldown": sec(18.0)},  # Ultimate Dark Orb
+    7: {"windup": sec(0.25), "active": sec(0.30),  "cooldown": sec(3.5)},   # Dual-Blade Frenzy
+}

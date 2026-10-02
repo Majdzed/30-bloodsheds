@@ -163,6 +163,9 @@ class Boss:
     # --- global recovery ---
     recovery_timer: int = 0       # 0.3 s global recovery after any action
 
+    # --- hit tracking (prevents multi-hit within one active window) ---
+    attack_hit_landed: bool = False
+
     # ---- derived / helpers ------------------------------------------------
 
     @property

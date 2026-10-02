@@ -2,8 +2,8 @@
 
 NO drawing code here. Rendering lives in renderer.py and only READS env state.
 
-Status: entities initialised; observation filled for spatial + one-hot features.
-        step() still placeholder – movement comes next.
+Status: movement + boss Lightning Strike + player heart damage + episode termination.
+        Katana attacks, reward shaping, roll/parry/jump come next.
 """
 
 from enum import IntEnum
@@ -74,7 +74,7 @@ class BossFightEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": C.FPS}
 
     def __init__(self, weapon="katana", fight=1, upgrade="health",
-                 frame_skip=C.FRAME_SKIP, render_mode=None):
+                frame_skip=C.FRAME_SKIP, render_mode=None):
         super().__init__()
         assert weapon in C.WEAPONS and upgrade in ("health", "flask")
         assert frame_skip < C.PARRY_WINDOW_FRAMES, "parry window must exceed frame skip"
@@ -90,7 +90,12 @@ class BossFightEnv(gym.Env):
         # entities are None until reset()
         self.player: Player | None = None
         self.boss:   Boss   | None = None
-        self._t = 0
+        self._frame: int = 0          # total frames simulated (never resets)
+        self._fight_frame: int = 0    # frames elapsed in the current fight
+        self._terminated: bool = False
+        # Frames in the boss's current windup (for obs normalisation).
+        # Set when the boss enters BossState.WINDUP, cleared on IDLE.
+        self._boss_windup_total: int = 1   # safe default, never 0
 
     # ---- gauntlet control -------------------------------------------------
     def set_fight(self, fight: int) -> None:
@@ -100,7 +105,9 @@ class BossFightEnv(gym.Env):
     # ---- Gymnasium API ----------------------------------------------------
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self._t = 0
+        self._fight_frame = 0
+        self._terminated  = False
+        self._boss_windup_total = 1
 
         max_hp = C.boss_max_hp(self.fight)
         max_hearts = C.max_hearts_for_fight(self.fight, self.upgrade)
@@ -126,25 +133,131 @@ class BossFightEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
-        # TODO: apply action for self.frame_skip frames, run boss AI, collect reward.
-        self._t += 1
-        terminated = self._t >= 100          # PLACEHOLDER
-        return self._get_obs(), 0.0, terminated, False, {}
+        reward = 0.0
+        terminated = False
+        truncated  = False
 
+        for _ in range(self.frame_skip):
+            self._tick(action)
+            if self._terminated:
+                terminated = True
+                break
+            if self._fight_frame >= C.FIGHT_TIME_LIMIT_FRAMES:
+                truncated = True
+                break
+
+        # TODO: accumulate reward inside _tick and sum here
+        reward += C.REWARD["step"]
+
+        return self._get_obs(), reward, terminated, truncated, {}
+
+    # ---- Core simulation: one frame ---------------------------------------
+    def _tick(self, action: int) -> None:
+        """Advance the game by exactly one frame (1/60 s)."""
+        self._frame       += 1
+        self._fight_frame += 1
+        p = self.player
+        b = self.boss
+
+        dt = 1.0 / C.FPS   # seconds per frame
+
+        # ---- Player movement (only when not locked into an action) ----
+        if p.state == PlayerState.IDLE:
+            if action == Action.MOVE_LEFT:
+                p.x -= C.PLAYER_SPEED * dt
+            elif action == Action.MOVE_RIGHT:
+                p.x += C.PLAYER_SPEED * dt
+        p.x = float(np.clip(p.x, 0.0, C.ARENA_W))
+
+        dist = abs(b.x - p.x)
+
+        # ================================================================
+        # Boss state machine
+        # ================================================================
+        # --- countdown any active timer ---
+        if b.action_timer > 0:
+            b.action_timer -= 1
+
+        # --- decrement global recovery ---
+        if b.recovery_timer > 0:
+            b.recovery_timer -= 1
+
+        # --- decrement ability cooldowns ---
+        for aid in b.ability_cd:
+            if b.ability_cd[aid] > 0:
+                b.ability_cd[aid] -= 1
+
+        if b.state == BossState.WINDUP:
+            # Windup finished → transition to ATTACK
+            if b.action_timer == 0:
+                ab = C.ABILITY_FRAMES[b.current_ability_id]
+                b.state        = BossState.ATTACK
+                b.action_timer = ab["active"]
+
+        elif b.state == BossState.ATTACK:
+            # --- Lightning Strike hit detection ---
+            if b.current_ability_id == 1:
+                # Damage fires on the FIRST frame of the active window
+                # Use a one-shot flag on Boss to avoid multi-hitting.
+                if not b.attack_hit_landed:
+                    if dist <= 120.0:          # Lightning Strike range: 120 u
+                        p.hearts -= 1
+                        if p.hearts <= 0:
+                            self._terminated = True
+                    b.attack_hit_landed = True
+
+            # Active phase finished → recovery
+            if b.action_timer == 0:
+                b.state              = BossState.IDLE
+                b.current_ability_id = 0
+                b.attack_hit_landed  = False
+                b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+
+        elif b.state == BossState.IDLE:
+            # Walk toward player when out of melee range
+            if dist > C.MELEE_TRIGGER_DIST:
+                direction = 1.0 if p.x > b.x else -1.0
+                b.x += direction * C.BOSS_SPEED * dt
+                b.x = float(np.clip(b.x, 0.0, C.ARENA_W))
+
+            # --- Ability decision (simplified: Lightning Strike only for now) ---
+            if b.recovery_timer == 0:
+                # Lightning Strike: player within 100 u, ability off cooldown
+                if dist <= C.MELEE_TRIGGER_DIST and b.ability_cd[1] == 0:
+                    ab = C.ABILITY_FRAMES[1]
+                    b.state              = BossState.WINDUP
+                    b.current_ability_id = 1
+                    b.action_timer       = ab["windup"]
+                    b.attack_hit_landed  = False
+                    b.ability_cd[1]      = ab["cooldown"]
+                    self._boss_windup_total = ab["windup"]
+
+    # ---- Action masks -----------------------------------------------------
     def action_masks(self) -> np.ndarray:
         """Boolean mask over Action. Used by MaskablePPO (sb3-contrib)."""
         mask = np.ones(N_ACTIONS, dtype=bool)
-        # TODO: real conditions from SPEC.md §6; placeholders for now
-        if self.player is not None:
-            mask[Action.USE_SUPER] = self.player.super_stacks >= C.SUPER_STACKS_REQUIRED
-            mask[Action.USE_FLASK] = self.player.flasks > 0 and \
-                                     self.player.hearts < self.player.max_hearts
-        else:
-            mask[Action.USE_SUPER] = False
-            mask[Action.USE_FLASK] = False
+        if self.player is None:
+            # Before first reset – block everything except IDLE
+            mask[:] = False
+            mask[Action.IDLE] = True
+            return mask
+
+        p = self.player
+
+        # Movement walls
+        mask[Action.MOVE_LEFT]  = p.x > 0.0
+        mask[Action.MOVE_RIGHT] = p.x < C.ARENA_W
+
+        # Resources (full logic comes with combat; stubs are spec-correct)
+        mask[Action.USE_SUPER] = p.super_stacks >= C.SUPER_STACKS_REQUIRED
+        mask[Action.USE_FLASK] = p.flasks > 0 and p.hearts < p.max_hearts
+
+        # Everything combat-gated is not yet implemented – leave unmasked for now
+        # TODO: JUMP, LIGHT_ATTACK, HEAVY_ATTACK, DODGE_ROLL, PARRY when not actionable
+
         return mask
 
-    # ---- Observation builder ---------------------------------------------
+
     def _get_obs(self) -> np.ndarray:
         obs = np.zeros(OBS_SIZE, dtype=np.float32)
         p   = self.player
@@ -170,7 +283,11 @@ class BossFightEnv(gym.Env):
 
             # boss group (5)
             obs[_scalar_idx("boss_hp")]             = b.hp_norm
-            obs[_scalar_idx("boss_windup_timer")]   = b.windup_timer_norm
+            # boss_windup_timer: fraction of windup remaining (1→0 as boss approaches attack)
+            if b.state == BossState.WINDUP and self._boss_windup_total > 0:
+                obs[_scalar_idx("boss_windup_timer")] = b.action_timer / self._boss_windup_total
+            else:
+                obs[_scalar_idx("boss_windup_timer")] = 0.0
             obs[_scalar_idx("boss_is_healing")]     = 1.0 if b.is_healing else 0.0
             obs[_scalar_idx("heal_orbs_remaining")] = b.orbs_remaining / C.HEAL_ORB_COUNT
             obs[_scalar_idx("boss_blink_cd")]       = b.blink_cd_norm
