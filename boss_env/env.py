@@ -246,6 +246,29 @@ class BossFightEnv(gym.Env):
                 p.state   = PlayerState.IDLE
                 p.roll_cd = C.sec(C.ROLL_COOLDOWN_S)
 
+        elif p.state == PlayerState.PARRY:
+            # Parry window is active for PARRY_WINDOW_FRAMES frames (tracked by action_timer)
+            if p.parry_active > 0:
+                p.parry_active -= 1
+            if p.action_timer == 0:
+                p.state    = PlayerState.IDLE
+                p.parry_cd = C.sec(C.PARRY_COOLDOWN_S)
+
+        elif p.state == PlayerState.SUPER:
+            # Blood Katana: player invulnerable, damage at end of lock
+            if p.action_timer == 0:
+                dist = abs(b.x - p.x)
+                if dist <= 200.0:              # Blood Katana reach: 200 u
+                    dmg = min(self.weapon.super_dmg, b.hp)
+                    b.hp -= dmg
+                    self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
+                    self._damage_dealt += dmg
+                    if b.hp <= 0:
+                        b.hp = 0
+                        self._terminated = True
+                p.super_stacks = 0
+                p.state        = PlayerState.IDLE
+
         elif p.state == PlayerState.IDLE:
             # Accept new action input when recovery has also cleared
             if p.recovery_timer == 0:
@@ -265,11 +288,20 @@ class BossFightEnv(gym.Env):
                         p.action_timer        = C.sec(C.ROLL_DURATION_S)
                         p.iframes             = C.sec(C.ROLL_IFRAMES_S)
                         # Roll away from the boss; if at wall, roll toward it
-                        dist_now = abs(b.x - p.x)
                         if b.x > p.x:
                             p.roll_dir = -1.0 if p.x > 0 else 1.0
                         else:
                             p.roll_dir =  1.0 if p.x < C.ARENA_W else -1.0
+                elif action == Action.PARRY:
+                    if p.parry_cd == 0:
+                        p.state        = PlayerState.PARRY
+                        p.action_timer = C.PARRY_WINDOW_FRAMES
+                        p.parry_active = C.PARRY_WINDOW_FRAMES
+                elif action == Action.USE_SUPER:
+                    if p.super_stacks >= C.SUPER_STACKS_REQUIRED:
+                        p.state        = PlayerState.SUPER
+                        p.action_timer = C.sec(self.weapon.super_duration_s)
+                        p.iframes      = p.action_timer   # invulnerable entire duration
 
         # ---- Player movement (only when idle and not in post-attack recovery) ----
         if p.state == PlayerState.IDLE and p.recovery_timer == 0:
@@ -310,15 +342,32 @@ class BossFightEnv(gym.Env):
                 # Damage fires on the FIRST frame of the active window
                 # Use a one-shot flag on Boss to avoid multi-hitting.
                 if not b.attack_hit_landed:
-                    if dist <= 120.0 and p.iframes == 0:   # i-frames block all non-Orb hits
-                        p.hearts -= 1
-                        self._tick_reward += C.REWARD["heart_lost"]
-                        self._hearts_lost += 1
-                        if p.hearts <= 0:
-                            self._terminated = True
+                    if dist <= 120.0:
+                        if p.parry_active > 0:
+                            # --- Successful parry ---
+                            # Hit is negated; +1 super stack; melee → stun boss 0.5 s
+                            p.super_stacks = min(p.super_stacks + 1, C.SUPER_STACKS_REQUIRED)
+                            self._tick_reward += C.REWARD["parry"]
+                            # Lightning Strike is melee → stun
+                            b.state        = BossState.STUN
+                            b.action_timer = C.sec(0.5)
+                        elif p.iframes == 0:   # i-frames block all non-Orb hits
+                            p.hearts -= 1
+                            self._tick_reward += C.REWARD["heart_lost"]
+                            self._hearts_lost += 1
+                            if p.hearts <= 0:
+                                self._terminated = True
                     b.attack_hit_landed = True
 
             # Active phase finished → recovery
+            if b.action_timer == 0:
+                b.state              = BossState.IDLE
+                b.current_ability_id = 0
+                b.attack_hit_landed  = False
+                b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+
+        elif b.state == BossState.STUN:
+            # Boss stunned: wait out action_timer, then recover
             if b.action_timer == 0:
                 b.state              = BossState.IDLE
                 b.current_ability_id = 0
@@ -360,9 +409,10 @@ class BossFightEnv(gym.Env):
         mask[Action.MOVE_LEFT]  = p.x > 0.0
         mask[Action.MOVE_RIGHT] = p.x < C.ARENA_W
 
-        # "Not actionable" = attack windup, post-attack recovery, or rolling (SPEC §6)
+        # "Not actionable" = attack windup, recovery, rolling, parrying, or in super (SPEC §6)
         not_actionable = (
-            p.state in (PlayerState.ATTACK, PlayerState.ROLL)
+            p.state in (PlayerState.ATTACK, PlayerState.ROLL,
+                        PlayerState.PARRY, PlayerState.SUPER)
             or p.recovery_timer > 0
         )
 
@@ -382,11 +432,17 @@ class BossFightEnv(gym.Env):
             and p.roll_cd == 0
         )
 
+        # Parry: needs cooldown clear; blocked while not actionable
+        mask[Action.PARRY] = not not_actionable and p.parry_cd == 0
+
         # Resources
-        mask[Action.USE_SUPER] = p.super_stacks >= C.SUPER_STACKS_REQUIRED and not not_actionable
+        mask[Action.USE_SUPER] = (
+            p.super_stacks >= C.SUPER_STACKS_REQUIRED
+            and not not_actionable
+        )
         mask[Action.USE_FLASK] = p.flasks > 0 and p.hearts < p.max_hearts and not not_actionable
 
-        # TODO: JUMP, PARRY when not actionable
+        # TODO: JUMP when not actionable
 
         return mask
 
