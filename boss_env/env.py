@@ -220,6 +220,36 @@ class BossFightEnv(gym.Env):
         elif p.stamina < C.STAMINA_MAX:
             p.stamina = min(C.STAMINA_MAX, p.stamina + C.STAMINA_REGEN_PER_S * dt)
 
+        # --- Revolver reload logic ---
+        if self.weapon.uses_ammo:
+            # Cancel reload on shooting, parry, jump, super, drink, or airborne
+            cancels_reload = (
+                action in (Action.LIGHT_ATTACK, Action.HEAVY_ATTACK, Action.PARRY, Action.JUMP, Action.USE_SUPER)
+                or p.state in (PlayerState.ATTACK, PlayerState.PARRY, PlayerState.SUPER, PlayerState.DRINK)
+                or p.airborne
+            )
+            if cancels_reload:
+                if p.reload_timer > 0:
+                    p.reload_timer = 0
+                p.reload_idle_timer = 0
+            else:
+                if p.reload_timer > 0:
+                    p.reload_timer -= 1
+                    if p.reload_timer == 0:
+                        p.ammo = C.REVOLVER_MAG
+                elif p.ammo < C.REVOLVER_MAG:
+                    if p.ammo == 0:
+                        # Empty mag triggers reload immediately
+                        p.reload_timer = C.sec(C.REVOLVER_RELOAD_S)
+                        p.reload_idle_timer = 0
+                    elif p.state == PlayerState.IDLE and action in (Action.IDLE, Action.MOVE_LEFT, Action.MOVE_RIGHT, Action.DODGE_ROLL):
+                        p.reload_idle_timer += 1
+                        if p.reload_idle_timer >= C.sec(C.REVOLVER_IDLE_RELOAD_DELAY_S):
+                            p.reload_timer = C.sec(C.REVOLVER_RELOAD_S)
+                            p.reload_idle_timer = 0
+                    else:
+                        p.reload_idle_timer = 0
+
         if p.state == PlayerState.ATTACK:
             if p.action_timer == 0:
                 # --- Damage resolution: end of windup ---
@@ -247,16 +277,25 @@ class BossFightEnv(gym.Env):
 
                 # Check orb destruction (Siphon Heal mechanic)
                 if self._heal_orbs:
-                    atk_range = self.weapon.light_range if p.pending_attack_id == 1 else self.weapon.heavy_range
-                    in_range = [ox for ox in self._heal_orbs if abs(ox - p.x) <= atk_range]
-                    if in_range:
-                        target = min(in_range, key=lambda ox: abs(ox - p.x))
-                        self._heal_orbs.remove(target)
-                        b.orbs_remaining = len(self._heal_orbs)
-                        if b.state == BossState.HEAL and b.orbs_remaining == 0:
+                    if self.weapon.uses_ammo and p.pending_attack_id == 2:
+                        # Revolver piercing heavy destroys all orbs in line of fire!
+                        self._heal_orbs.clear()
+                        b.orbs_remaining = 0
+                        if b.state == BossState.HEAL:
                             b.state = BossState.STUN
                             b.action_timer = C.sec(1.0)
                             self._tick_reward += C.REWARD["heal_interrupted"]
+                    else:
+                        atk_range = self.weapon.light_range if p.pending_attack_id == 1 else self.weapon.heavy_range
+                        in_range = [ox for ox in self._heal_orbs if abs(ox - p.x) <= atk_range]
+                        if in_range:
+                            target = min(in_range, key=lambda ox: abs(ox - p.x))
+                            self._heal_orbs.remove(target)
+                            b.orbs_remaining = len(self._heal_orbs)
+                            if b.state == BossState.HEAL and b.orbs_remaining == 0:
+                                b.state = BossState.STUN
+                                b.action_timer = C.sec(1.0)
+                                self._tick_reward += C.REWARD["heal_interrupted"]
 
                 p.pending_attack_id = 0
                 p.state = PlayerState.IDLE    # recovery phase: player is IDLE but locked by recovery_timer
@@ -280,10 +319,10 @@ class BossFightEnv(gym.Env):
                 p.parry_cd = C.sec(C.PARRY_COOLDOWN_S)
 
         elif p.state == PlayerState.SUPER:
-            # Blood Katana: player invulnerable, damage at end of lock
             if p.action_timer == 0:
                 dist = abs(b.x - p.x)
-                if dist <= 200.0:              # Blood Katana reach: 200 u
+                if self.weapon.name == "revolver":
+                    # Ultra Plasma Shot: fullscreen laser, 80 dmg, staggers boss 1.0s, clears projectiles
                     dmg = min(self.weapon.super_dmg, b.hp)
                     b.hp -= dmg
                     self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
@@ -292,14 +331,39 @@ class BossFightEnv(gym.Env):
                         b.hp = 0
                         self._terminated = True
 
-                # Super destroys all heal orbs in range
-                if self._heal_orbs:
-                    self._heal_orbs = [ox for ox in self._heal_orbs if abs(ox - p.x) > 200.0]
-                    b.orbs_remaining = len(self._heal_orbs)
-                    if b.state == BossState.HEAL and b.orbs_remaining == 0:
-                        b.state = BossState.STUN
-                        b.action_timer = C.sec(1.0)
-                        self._tick_reward += C.REWARD["heal_interrupted"]
+                    b.state = BossState.STUN
+                    b.action_timer = C.sec(1.0)
+
+                    # Clears all boss projectiles
+                    self._light_bolts.clear()
+                    self._dark_waves.clear()
+                    self._dark_orbs.clear()
+
+                    # Laser destroys all heal orbs
+                    if self._heal_orbs:
+                        self._heal_orbs.clear()
+                        b.orbs_remaining = 0
+                        if b.state == BossState.HEAL:
+                            self._tick_reward += C.REWARD["heal_interrupted"]
+                else:
+                    # Blood Katana: player invulnerable, 90 dmg, 200u reach
+                    if dist <= 200.0:
+                        dmg = min(self.weapon.super_dmg, b.hp)
+                        b.hp -= dmg
+                        self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
+                        self._damage_dealt += dmg
+                        if b.hp <= 0:
+                            b.hp = 0
+                            self._terminated = True
+
+                    # Super destroys all heal orbs in range
+                    if self._heal_orbs:
+                        self._heal_orbs = [ox for ox in self._heal_orbs if abs(ox - p.x) > 200.0]
+                        b.orbs_remaining = len(self._heal_orbs)
+                        if b.state == BossState.HEAL and b.orbs_remaining == 0:
+                            b.state = BossState.STUN
+                            b.action_timer = C.sec(1.0)
+                            self._tick_reward += C.REWARD["heal_interrupted"]
 
                 p.super_stacks = 0
                 p.state        = PlayerState.IDLE
@@ -315,13 +379,25 @@ class BossFightEnv(gym.Env):
             # Accept new action input when recovery has also cleared
             if p.recovery_timer == 0:
                 if action == Action.LIGHT_ATTACK and not p.airborne:
-                    p.state             = PlayerState.ATTACK
-                    p.pending_attack_id = 1
-                    p.action_timer      = C.sec(self.weapon.light_windup_s)
+                    ammo_ok = (not self.weapon.uses_ammo) or (p.ammo >= 1)
+                    if ammo_ok:
+                        if self.weapon.uses_ammo:
+                            p.ammo -= 1
+                            p.reload_timer = 0
+                            p.reload_idle_timer = 0
+                        p.state             = PlayerState.ATTACK
+                        p.pending_attack_id = 1
+                        p.action_timer      = C.sec(self.weapon.light_windup_s)
                 elif action == Action.HEAVY_ATTACK and not p.airborne:
-                    p.state             = PlayerState.ATTACK
-                    p.pending_attack_id = 2
-                    p.action_timer      = C.sec(self.weapon.heavy_windup_s)
+                    ammo_ok = (not self.weapon.uses_ammo) or (p.ammo >= C.REVOLVER_HEAVY_COST)
+                    if ammo_ok:
+                        if self.weapon.uses_ammo:
+                            p.ammo -= C.REVOLVER_HEAVY_COST
+                            p.reload_timer = 0
+                            p.reload_idle_timer = 0
+                        p.state             = PlayerState.ATTACK
+                        p.pending_attack_id = 2
+                        p.action_timer      = C.sec(self.weapon.heavy_windup_s)
                 elif action == Action.DODGE_ROLL and not p.airborne:
                     if p.stamina >= C.ROLL_COST and p.roll_cd == 0:
                         p.stamina            -= C.ROLL_COST
@@ -708,8 +784,11 @@ class BossFightEnv(gym.Env):
             mask[Action.MOVE_RIGHT] = False
 
         # Attacks: blocked if not actionable or airborne (no air attacks)
-        mask[Action.LIGHT_ATTACK] = not not_actionable and not p.airborne
-        mask[Action.HEAVY_ATTACK] = not not_actionable and not p.airborne
+        # For Revolver: light needs ammo >= 1, heavy needs ammo >= 2
+        light_ammo_ok = (not self.weapon.uses_ammo) or (p.ammo >= 1)
+        heavy_ammo_ok = (not self.weapon.uses_ammo) or (p.ammo >= C.REVOLVER_HEAVY_COST)
+        mask[Action.LIGHT_ATTACK] = not not_actionable and not p.airborne and light_ammo_ok
+        mask[Action.HEAVY_ATTACK] = not not_actionable and not p.airborne and heavy_ammo_ok
 
         # Dodge roll: needs stamina and cooldown clear; blocked if not actionable or airborne
         mask[Action.DODGE_ROLL] = (
