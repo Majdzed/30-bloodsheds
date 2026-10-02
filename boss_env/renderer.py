@@ -7,6 +7,7 @@ Only reads env state; never modifies it.
 import math
 import pygame
 from . import constants as C
+from .abilities import ABILITIES
 from .entities import PlayerState, BossState
 
 
@@ -39,6 +40,8 @@ class Renderer:
         return sx, sy
 
     def draw(self, env):
+        if hasattr(env, "unwrapped"):
+            env = env.unwrapped
         p = env.player
         b = env.boss
         if p is None or b is None:
@@ -78,25 +81,23 @@ class Renderer:
         # 2. Hazards & Boss Ability Ground Telegraphs
         # -------------------------------------------------------------
         # 2A. Dark Spikes (Ability 2)
-        if env._spike_timer > 0:
-            sp_x, sp_y = self.world_to_screen(env._spike_x, 0.0)
+        for spike in getattr(env, "_dark_spikes", []):
+            sp_x, sp_y = self.world_to_screen(spike["x"], 0.0)
             sp_radius = int(70 * self.scale)  # 140u diameter
-            spike_surf = pygame.Surface((sp_radius * 2, 30), pygame.SRCALPHA)
-            # Pulsing warning ellipse on ground
-            alpha = int(120 + 80 * math.sin(now_ticks * 0.03))
-            pygame.draw.ellipse(spike_surf, (180, 30, 220, alpha), (0, 0, sp_radius * 2, 30))
-            self.screen.blit(spike_surf, (sp_x - sp_radius, sp_y - 15))
-        elif env._spike_active_timer > 0:
-            # Spikes erupting from the ground!
-            sp_x, sp_y = self.world_to_screen(env._spike_x, 0.0)
-            sp_radius = int(70 * self.scale)
-            for ox in range(-sp_radius + 10, sp_radius - 10, 20):
-                spike_h = int(60 + 20 * math.sin(ox))
-                pygame.draw.polygon(
-                    self.screen,
-                    (220, 40, 240),
-                    [(sp_x + ox - 8, sp_y), (sp_x + ox, sp_y - spike_h), (sp_x + ox + 8, sp_y)]
-                )
+            if spike.get("warning_timer", 0) > 0:
+                spike_surf = pygame.Surface((sp_radius * 2, 30), pygame.SRCALPHA)
+                alpha = int(120 + 80 * math.sin(now_ticks * 0.03))
+                pygame.draw.ellipse(spike_surf, (180, 30, 220, alpha), (0, 0, sp_radius * 2, 30))
+                self.screen.blit(spike_surf, (sp_x - sp_radius, sp_y - 15))
+            elif spike.get("active_timer", 0) > 0:
+                # Spikes erupting from the ground!
+                for ox in range(-sp_radius + 10, sp_radius - 10, 20):
+                    spike_h = int(60 + 20 * math.sin(ox))
+                    pygame.draw.polygon(
+                        self.screen,
+                        (220, 40, 240),
+                        [(sp_x + ox - 8, sp_y), (sp_x + ox, sp_y - spike_h), (sp_x + ox + 8, sp_y)]
+                    )
 
         # -------------------------------------------------------------
         # 3. Boss Rendering
@@ -289,7 +290,7 @@ class Renderer:
 
         # Dynamic ability telegraph banner
         if b.state == BossState.WINDUP:
-            ab_name = C.ABILITIES[b.current_ability_id - 1].name.upper() if b.current_ability_id > 0 else "ATTACK"
+            ab_name = ABILITIES[b.current_ability_id - 1].name.upper() if 1 <= b.current_ability_id <= len(ABILITIES) else "ATTACK"
             txt_warn = self.font_main.render(f"! {ab_name} !", True, (255, 70, 70))
             self.screen.blit(txt_warn, (bar_x + bar_w - txt_warn.get_width(), bar_y - 24))
         elif b.state == BossState.HEAL:
