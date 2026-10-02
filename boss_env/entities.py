@@ -77,6 +77,8 @@ class Player:
     parry_cd: int = 0            # cooldown frames after a parry ends
     parry_active: int = 0        # frames the parry window is still open
     iframes: int = 0             # invulnerability frames (roll i-frames)
+    recovery_timer: int = 0      # post-attack locked frames (cannot act)
+    pending_attack_id: int = 0   # 1=light, 2=heavy (set at windup start, cleared after damage)
 
     # --- airborne ---
     airborne: bool = False

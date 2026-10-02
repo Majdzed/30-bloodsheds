@@ -161,8 +161,55 @@ class BossFightEnv(gym.Env):
 
         dt = 1.0 / C.FPS   # seconds per frame
 
-        # ---- Player movement (only when not locked into an action) ----
-        if p.state == PlayerState.IDLE:
+        # ================================================================
+        # Player state machine
+        # ================================================================
+
+        # --- Tick down active timers ---
+        if p.action_timer > 0:
+            p.action_timer -= 1
+        if p.recovery_timer > 0:
+            p.recovery_timer -= 1
+        if p.roll_cd > 0:
+            p.roll_cd -= 1
+        if p.parry_cd > 0:
+            p.parry_cd -= 1
+
+        if p.state == PlayerState.ATTACK:
+            if p.action_timer == 0:
+                # --- Damage resolution: end of windup ---
+                dist = abs(b.x - p.x)
+                if p.pending_attack_id == 1:        # light attack
+                    if dist <= self.weapon.light_range:
+                        b.hp -= self.weapon.light_dmg
+                        if b.hp <= 0:
+                            b.hp = 0
+                            self._terminated = True
+                    p.recovery_timer = C.sec(self.weapon.light_recovery_s)
+                elif p.pending_attack_id == 2:      # heavy attack
+                    if dist <= self.weapon.heavy_range:
+                        b.hp -= self.weapon.heavy_dmg
+                        if b.hp <= 0:
+                            b.hp = 0
+                            self._terminated = True
+                    p.recovery_timer = C.sec(self.weapon.heavy_recovery_s)
+                p.pending_attack_id = 0
+                p.state = PlayerState.IDLE    # recovery phase: player is IDLE but locked by recovery_timer
+
+        elif p.state == PlayerState.IDLE:
+            # Accept new action input when recovery has also cleared
+            if p.recovery_timer == 0:
+                if action == Action.LIGHT_ATTACK:
+                    p.state            = PlayerState.ATTACK
+                    p.pending_attack_id = 1
+                    p.action_timer     = C.sec(self.weapon.light_windup_s)
+                elif action == Action.HEAVY_ATTACK:
+                    p.state            = PlayerState.ATTACK
+                    p.pending_attack_id = 2
+                    p.action_timer     = C.sec(self.weapon.heavy_windup_s)
+
+        # ---- Player movement (only when idle and not in post-attack recovery) ----
+        if p.state == PlayerState.IDLE and p.recovery_timer == 0:
             if action == Action.MOVE_LEFT:
                 p.x -= C.PLAYER_SPEED * dt
             elif action == Action.MOVE_RIGHT:
@@ -248,12 +295,23 @@ class BossFightEnv(gym.Env):
         mask[Action.MOVE_LEFT]  = p.x > 0.0
         mask[Action.MOVE_RIGHT] = p.x < C.ARENA_W
 
-        # Resources (full logic comes with combat; stubs are spec-correct)
-        mask[Action.USE_SUPER] = p.super_stacks >= C.SUPER_STACKS_REQUIRED
-        mask[Action.USE_FLASK] = p.flasks > 0 and p.hearts < p.max_hearts
+        # "Not actionable" = in attack windup or post-attack recovery (SPEC §6)
+        not_actionable = (p.state == PlayerState.ATTACK) or (p.recovery_timer > 0)
 
-        # Everything combat-gated is not yet implemented – leave unmasked for now
-        # TODO: JUMP, LIGHT_ATTACK, HEAVY_ATTACK, DODGE_ROLL, PARRY when not actionable
+        # Movement also blocked while not actionable
+        if not_actionable:
+            mask[Action.MOVE_LEFT]  = False
+            mask[Action.MOVE_RIGHT] = False
+
+        # Attacks
+        mask[Action.LIGHT_ATTACK] = not not_actionable
+        mask[Action.HEAVY_ATTACK] = not not_actionable
+
+        # Resources (full logic comes with combat; stubs are spec-correct)
+        mask[Action.USE_SUPER] = p.super_stacks >= C.SUPER_STACKS_REQUIRED and not not_actionable
+        mask[Action.USE_FLASK] = p.flasks > 0 and p.hearts < p.max_hearts and not not_actionable
+
+        # TODO: JUMP, DODGE_ROLL, PARRY when not actionable
 
         return mask
 
