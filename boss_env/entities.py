@@ -158,6 +158,7 @@ class Boss:
 
     # --- blink ---
     blink_cd: int = 0             # frames remaining on the blink cooldown
+    blink_pending: bool = False   # True if boss will teleport during current windup
 
     # --- siphon heal ---
     orbs_remaining: int = 0       # 0 when not healing

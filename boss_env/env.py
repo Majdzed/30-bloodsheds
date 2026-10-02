@@ -272,6 +272,13 @@ class BossFightEnv(gym.Env):
                 p.super_stacks = 0
                 p.state        = PlayerState.IDLE
 
+        elif p.state == PlayerState.DRINK:
+            # Drinking flask takes 0.6s (36 frames). At end, heal 2 hearts.
+            if p.action_timer == 0:
+                p.flasks -= 1
+                p.hearts = min(p.max_hearts, p.hearts + C.FLASK_HEAL_HEARTS)
+                p.state  = PlayerState.IDLE
+
         elif p.state == PlayerState.IDLE:
             # Accept new action input when recovery has also cleared
             if p.recovery_timer == 0:
@@ -305,6 +312,10 @@ class BossFightEnv(gym.Env):
                         p.state        = PlayerState.SUPER
                         p.action_timer = C.sec(self.weapon.super_duration_s)
                         p.iframes      = p.action_timer   # invulnerable entire duration
+                elif action == Action.USE_FLASK and not p.airborne:
+                    if p.flasks > 0 and p.hearts < p.max_hearts:
+                        p.state        = PlayerState.DRINK
+                        p.action_timer = C.sec(C.FLASK_DRINK_S)
                 elif action == Action.JUMP and not p.airborne:
                     p.vy       = C.JUMP_VY_INITIAL
                     p.airborne = True
@@ -368,12 +379,22 @@ class BossFightEnv(gym.Env):
         if b.recovery_timer > 0:
             b.recovery_timer -= 1
 
+        # --- decrement blink cooldown ---
+        if b.blink_cd > 0:
+            b.blink_cd -= 1
+
         # --- decrement ability cooldowns ---
         for aid in b.ability_cd:
             if b.ability_cd[aid] > 0:
                 b.ability_cd[aid] -= 1
 
         if b.state == BossState.WINDUP:
+            # Teleport during slash windup if blink was triggered
+            if b.blink_pending and b.action_timer <= (self._boss_windup_total // 2):
+                target_x = p.x + (80.0 if b.x > p.x else -80.0)
+                b.x = float(np.clip(target_x, 0.0, C.ARENA_W))
+                b.blink_pending = False
+
             # Windup finished → transition to ATTACK (or spawn projectile)
             if b.action_timer == 0:
                 ab = C.ABILITY_FRAMES[b.current_ability_id]
@@ -436,8 +457,8 @@ class BossFightEnv(gym.Env):
             # --- Ability decision (abilities 1 and 4, spec-correct distance rules) ---
             if b.recovery_timer == 0:
                 candidates = []
-                # Lightning Strike: player within 100 u
-                if dist <= C.MELEE_TRIGGER_DIST and b.ability_cd[1] == 0:
+                # Lightning Strike: player within 100 u (or beyond 150 u with blink ready)
+                if (dist <= C.MELEE_TRIGGER_DIST or (dist > C.BLINK_MIN_DIST and b.blink_cd == 0)) and b.ability_cd[1] == 0:
                     candidates.append(1)
                 # Light Bolt: player beyond 150 u, unlocked (fight >= 4)
                 if (dist > C.BLINK_MIN_DIST and b.ability_cd[4] == 0
@@ -453,6 +474,10 @@ class BossFightEnv(gym.Env):
                     b.attack_hit_landed  = False
                     b.ability_cd[chosen] = ab["cooldown"]
                     self._boss_windup_total = ab["windup"]
+                    if chosen == 1 and dist > C.BLINK_MIN_DIST and b.blink_cd == 0:
+                        b.blink_pending = True
+                        b.blink_cd = C.sec(C.BLINK_COOLDOWN_S)
+
 
     # ---- Action masks -----------------------------------------------------
     def action_masks(self) -> np.ndarray:
@@ -470,10 +495,11 @@ class BossFightEnv(gym.Env):
         mask[Action.MOVE_LEFT]  = p.x > 0.0
         mask[Action.MOVE_RIGHT] = p.x < C.ARENA_W
 
-        # "Not actionable" = attack windup, recovery, rolling, parrying, or in super (SPEC §6)
+        # "Not actionable" = attack windup, recovery, rolling, parrying, drinking, or in super (SPEC §6)
         not_actionable = (
             p.state in (PlayerState.ATTACK, PlayerState.ROLL,
-                        PlayerState.PARRY, PlayerState.SUPER)
+                        PlayerState.PARRY, PlayerState.SUPER,
+                        PlayerState.DRINK)
             or p.recovery_timer > 0
         )
 
