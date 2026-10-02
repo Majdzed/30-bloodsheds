@@ -96,6 +96,11 @@ class BossFightEnv(gym.Env):
         # Frames in the boss's current windup (for obs normalisation).
         # Set when the boss enters BossState.WINDUP, cleared on IDLE.
         self._boss_windup_total: int = 1   # safe default, never 0
+        # Reward accumulated inside _tick, drained each step()
+        self._tick_reward: float = 0.0
+        # Per-episode stats (for info dict)
+        self._hearts_lost: int   = 0
+        self._damage_dealt: float = 0.0
 
     # ---- gauntlet control -------------------------------------------------
     def set_fight(self, fight: int) -> None:
@@ -108,6 +113,9 @@ class BossFightEnv(gym.Env):
         self._fight_frame = 0
         self._terminated  = False
         self._boss_windup_total = 1
+        self._tick_reward   = 0.0
+        self._hearts_lost   = 0
+        self._damage_dealt  = 0.0
 
         max_hp = C.boss_max_hp(self.fight)
         max_hearts = C.max_hearts_for_fight(self.fight, self.upgrade)
@@ -133,7 +141,7 @@ class BossFightEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
-        reward = 0.0
+        self._tick_reward = 0.0   # reset accumulator at the start of each decision
         terminated = False
         truncated  = False
 
@@ -146,10 +154,28 @@ class BossFightEnv(gym.Env):
                 truncated = True
                 break
 
-        # TODO: accumulate reward inside _tick and sum here
-        reward += C.REWARD["step"]
+        reward = self._tick_reward + C.REWARD["step"]
 
-        return self._get_obs(), reward, terminated, truncated, {}
+        # --- Terminal bonuses / penalties ---
+        if terminated:
+            if self.boss.hp <= 0:
+                reward += C.REWARD["win"]
+            else:
+                reward += C.REWARD["loss"]   # player died
+        elif truncated:
+            reward += C.REWARD["loss"]       # timeout counts as a loss
+
+        info = {}
+        if terminated or truncated:
+            info = {
+                "win":          self.boss.hp <= 0,
+                "hearts_lost":  self._hearts_lost,
+                "damage_dealt": self._damage_dealt,
+                "fight_frames": self._fight_frame,
+                "fight":        self.fight,
+            }
+
+        return self._get_obs(), reward, terminated, truncated, info
 
     # ---- Core simulation: one frame ---------------------------------------
     def _tick(self, action: int) -> None:
@@ -181,14 +207,20 @@ class BossFightEnv(gym.Env):
                 dist = abs(b.x - p.x)
                 if p.pending_attack_id == 1:        # light attack
                     if dist <= self.weapon.light_range:
-                        b.hp -= self.weapon.light_dmg
+                        dmg = min(self.weapon.light_dmg, b.hp)
+                        b.hp -= dmg
+                        self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
+                        self._damage_dealt += dmg
                         if b.hp <= 0:
                             b.hp = 0
                             self._terminated = True
                     p.recovery_timer = C.sec(self.weapon.light_recovery_s)
                 elif p.pending_attack_id == 2:      # heavy attack
                     if dist <= self.weapon.heavy_range:
-                        b.hp -= self.weapon.heavy_dmg
+                        dmg = min(self.weapon.heavy_dmg, b.hp)
+                        b.hp -= dmg
+                        self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
+                        self._damage_dealt += dmg
                         if b.hp <= 0:
                             b.hp = 0
                             self._terminated = True
@@ -249,6 +281,8 @@ class BossFightEnv(gym.Env):
                 if not b.attack_hit_landed:
                     if dist <= 120.0:          # Lightning Strike range: 120 u
                         p.hearts -= 1
+                        self._tick_reward += C.REWARD["heart_lost"]
+                        self._hearts_lost += 1
                         if p.hearts <= 0:
                             self._terminated = True
                     b.attack_hit_landed = True
