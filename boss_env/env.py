@@ -200,6 +200,14 @@ class BossFightEnv(gym.Env):
             p.roll_cd -= 1
         if p.parry_cd > 0:
             p.parry_cd -= 1
+        if p.iframes > 0:
+            p.iframes -= 1
+
+        # --- Stamina regen ---
+        if p.stamina_regen_delay > 0:
+            p.stamina_regen_delay -= 1
+        elif p.stamina < C.STAMINA_MAX:
+            p.stamina = min(C.STAMINA_MAX, p.stamina + C.STAMINA_REGEN_PER_S * dt)
 
         if p.state == PlayerState.ATTACK:
             if p.action_timer == 0:
@@ -228,17 +236,40 @@ class BossFightEnv(gym.Env):
                 p.pending_attack_id = 0
                 p.state = PlayerState.IDLE    # recovery phase: player is IDLE but locked by recovery_timer
 
+        elif p.state == PlayerState.ROLL:
+            # Move the player continuously during the roll
+            roll_speed = C.ROLL_DISTANCE / C.ROLL_DURATION_S   # u/s during roll
+            p.x += p.roll_dir * roll_speed * dt
+            p.x  = float(np.clip(p.x, 0.0, C.ARENA_W))
+            # Roll ends when action_timer reaches 0
+            if p.action_timer == 0:
+                p.state   = PlayerState.IDLE
+                p.roll_cd = C.sec(C.ROLL_COOLDOWN_S)
+
         elif p.state == PlayerState.IDLE:
             # Accept new action input when recovery has also cleared
             if p.recovery_timer == 0:
                 if action == Action.LIGHT_ATTACK:
-                    p.state            = PlayerState.ATTACK
+                    p.state             = PlayerState.ATTACK
                     p.pending_attack_id = 1
-                    p.action_timer     = C.sec(self.weapon.light_windup_s)
+                    p.action_timer      = C.sec(self.weapon.light_windup_s)
                 elif action == Action.HEAVY_ATTACK:
-                    p.state            = PlayerState.ATTACK
+                    p.state             = PlayerState.ATTACK
                     p.pending_attack_id = 2
-                    p.action_timer     = C.sec(self.weapon.heavy_windup_s)
+                    p.action_timer      = C.sec(self.weapon.heavy_windup_s)
+                elif action == Action.DODGE_ROLL:
+                    if p.stamina >= C.ROLL_COST and p.roll_cd == 0:
+                        p.stamina            -= C.ROLL_COST
+                        p.stamina_regen_delay = C.sec(C.STAMINA_REGEN_DELAY_S)
+                        p.state               = PlayerState.ROLL
+                        p.action_timer        = C.sec(C.ROLL_DURATION_S)
+                        p.iframes             = C.sec(C.ROLL_IFRAMES_S)
+                        # Roll away from the boss; if at wall, roll toward it
+                        dist_now = abs(b.x - p.x)
+                        if b.x > p.x:
+                            p.roll_dir = -1.0 if p.x > 0 else 1.0
+                        else:
+                            p.roll_dir =  1.0 if p.x < C.ARENA_W else -1.0
 
         # ---- Player movement (only when idle and not in post-attack recovery) ----
         if p.state == PlayerState.IDLE and p.recovery_timer == 0:
@@ -279,7 +310,7 @@ class BossFightEnv(gym.Env):
                 # Damage fires on the FIRST frame of the active window
                 # Use a one-shot flag on Boss to avoid multi-hitting.
                 if not b.attack_hit_landed:
-                    if dist <= 120.0:          # Lightning Strike range: 120 u
+                    if dist <= 120.0 and p.iframes == 0:   # i-frames block all non-Orb hits
                         p.hearts -= 1
                         self._tick_reward += C.REWARD["heart_lost"]
                         self._hearts_lost += 1
@@ -329,8 +360,11 @@ class BossFightEnv(gym.Env):
         mask[Action.MOVE_LEFT]  = p.x > 0.0
         mask[Action.MOVE_RIGHT] = p.x < C.ARENA_W
 
-        # "Not actionable" = in attack windup or post-attack recovery (SPEC §6)
-        not_actionable = (p.state == PlayerState.ATTACK) or (p.recovery_timer > 0)
+        # "Not actionable" = attack windup, post-attack recovery, or rolling (SPEC §6)
+        not_actionable = (
+            p.state in (PlayerState.ATTACK, PlayerState.ROLL)
+            or p.recovery_timer > 0
+        )
 
         # Movement also blocked while not actionable
         if not_actionable:
@@ -341,11 +375,18 @@ class BossFightEnv(gym.Env):
         mask[Action.LIGHT_ATTACK] = not not_actionable
         mask[Action.HEAVY_ATTACK] = not not_actionable
 
-        # Resources (full logic comes with combat; stubs are spec-correct)
+        # Dodge roll: needs stamina and cooldown clear; also blocked while not actionable
+        mask[Action.DODGE_ROLL] = (
+            not not_actionable
+            and p.stamina >= C.ROLL_COST
+            and p.roll_cd == 0
+        )
+
+        # Resources
         mask[Action.USE_SUPER] = p.super_stacks >= C.SUPER_STACKS_REQUIRED and not not_actionable
         mask[Action.USE_FLASK] = p.flasks > 0 and p.hearts < p.max_hearts and not not_actionable
 
-        # TODO: JUMP, DODGE_ROLL, PARRY when not actionable
+        # TODO: JUMP, PARRY when not actionable
 
         return mask
 

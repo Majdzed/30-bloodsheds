@@ -79,6 +79,7 @@ class Player:
     iframes: int = 0             # invulnerability frames (roll i-frames)
     recovery_timer: int = 0      # post-attack locked frames (cannot act)
     pending_attack_id: int = 0   # 1=light, 2=heavy (set at windup start, cleared after damage)
+    roll_dir: float = 1.0        # +1.0 or -1.0, set when roll starts
 
     # --- airborne ---
     airborne: bool = False
