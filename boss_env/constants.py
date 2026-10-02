@@ -33,6 +33,11 @@ ROLL_COOLDOWN_S = 0.6          # (proposed)
 
 JUMP_AIRTIME_S = 0.6
 JUMP_APEX = 100.0
+# Discrete 60 FPS kinematics for exact apex = 100 u and exact airtime = 0.6 s (36 frames):
+# N = 18 frames to apex. g = JUMP_APEX / (N*(N-1)/2 * dt²), vy0 = N * g * dt
+_N_HALF = round((JUMP_AIRTIME_S / 2.0) * FPS)
+JUMP_GRAVITY    = JUMP_APEX / (_N_HALF * (_N_HALF - 1) / 2.0 * (1.0 / FPS)**2)  # ≈ 2352.94 u/s²
+JUMP_VY_INITIAL = _N_HALF * JUMP_GRAVITY * (1.0 / FPS)                            # ≈ 705.88 u/s
 
 PARRY_WINDOW_FRAMES = 12       # 0.2 s. Must exceed FRAME_SKIP (see SPEC.md).
 PARRY_COOLDOWN_S = 1.0
@@ -139,3 +144,7 @@ ABILITY_FRAMES: dict = {
     6: {"windup": sec(1.20), "active": sec(2.0),   "cooldown": sec(18.0)},  # Ultimate Dark Orb
     7: {"windup": sec(0.25), "active": sec(0.30),  "cooldown": sec(3.5)},   # Dual-Blade Frenzy
 }
+
+# ---- Projectile constants ------------------------------------------------
+LIGHT_BOLT_SPEED      = 600.0   # u/s (SPEC §5 ability table)
+LIGHT_BOLT_HIT_RADIUS = 15.0    # u – tolerance for hit detection on a point projectile

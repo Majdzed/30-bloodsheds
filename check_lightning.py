@@ -60,6 +60,6 @@ else:
 assert hits > 0, "No hits landed – Lightning Strike never fired"
 assert terminated or truncated, "Episode never ended"
 if terminated:
-    assert env.player.hearts <= 0, "Terminated but hearts > 0"
+    assert env.player.hearts <= 0 or env.boss.hp <= 0, "Terminated but neither player nor boss died"
 
 print("All assertions passed (OK)")

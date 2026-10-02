@@ -2,8 +2,8 @@
 
 NO drawing code here. Rendering lives in renderer.py and only READS env state.
 
-Status: movement + boss Lightning Strike + player heart damage + episode termination.
-        Katana attacks, reward shaping, roll/parry/jump come next.
+Status: Katana combat complete with abilities 1 (Lightning Strike) and 4 (Light Bolt),
+        Jump, Roll, Parry, Super (Blood Katana), and rewards.
 """
 
 from enum import IntEnum
@@ -101,6 +101,8 @@ class BossFightEnv(gym.Env):
         # Per-episode stats (for info dict)
         self._hearts_lost: int   = 0
         self._damage_dealt: float = 0.0
+        # Active Light Bolt projectiles: each is {"x": float, "dir": +1 or -1}
+        self._light_bolts: list = []
 
     # ---- gauntlet control -------------------------------------------------
     def set_fight(self, fight: int) -> None:
@@ -116,6 +118,7 @@ class BossFightEnv(gym.Env):
         self._tick_reward   = 0.0
         self._hearts_lost   = 0
         self._damage_dealt  = 0.0
+        self._light_bolts   = []
 
         max_hp = C.boss_max_hp(self.fight)
         max_hearts = C.max_hearts_for_fight(self.fight, self.upgrade)
@@ -272,15 +275,15 @@ class BossFightEnv(gym.Env):
         elif p.state == PlayerState.IDLE:
             # Accept new action input when recovery has also cleared
             if p.recovery_timer == 0:
-                if action == Action.LIGHT_ATTACK:
+                if action == Action.LIGHT_ATTACK and not p.airborne:
                     p.state             = PlayerState.ATTACK
                     p.pending_attack_id = 1
                     p.action_timer      = C.sec(self.weapon.light_windup_s)
-                elif action == Action.HEAVY_ATTACK:
+                elif action == Action.HEAVY_ATTACK and not p.airborne:
                     p.state             = PlayerState.ATTACK
                     p.pending_attack_id = 2
                     p.action_timer      = C.sec(self.weapon.heavy_windup_s)
-                elif action == Action.DODGE_ROLL:
+                elif action == Action.DODGE_ROLL and not p.airborne:
                     if p.stamina >= C.ROLL_COST and p.roll_cd == 0:
                         p.stamina            -= C.ROLL_COST
                         p.stamina_regen_delay = C.sec(C.STAMINA_REGEN_DELAY_S)
@@ -302,9 +305,21 @@ class BossFightEnv(gym.Env):
                         p.state        = PlayerState.SUPER
                         p.action_timer = C.sec(self.weapon.super_duration_s)
                         p.iframes      = p.action_timer   # invulnerable entire duration
+                elif action == Action.JUMP and not p.airborne:
+                    p.vy       = C.JUMP_VY_INITIAL
+                    p.airborne = True
 
-        # ---- Player movement (only when idle and not in post-attack recovery) ----
-        if p.state == PlayerState.IDLE and p.recovery_timer == 0:
+        # ---- Jump physics (applied every tick, independent of state) ----
+        if p.airborne:
+            p.vy -= C.JUMP_GRAVITY * dt
+            p.y  += p.vy * dt
+            if p.y <= 0.0:             # landed
+                p.y       = 0.0
+                p.vy      = 0.0
+                p.airborne = False
+
+        # ---- Player horizontal movement (only when idle, on ground, not recovering) ----
+        if p.state == PlayerState.IDLE and p.recovery_timer == 0 and not p.airborne:
             if action == Action.MOVE_LEFT:
                 p.x -= C.PLAYER_SPEED * dt
             elif action == Action.MOVE_RIGHT:
@@ -314,7 +329,36 @@ class BossFightEnv(gym.Env):
         dist = abs(b.x - p.x)
 
         # ================================================================
+        # Light Bolt projectile physics
+        # ================================================================
+        new_bolts = []
+        for bolt in self._light_bolts:
+            prev_x = bolt["x"]
+            bolt["x"] += bolt["dir"] * C.LIGHT_BOLT_SPEED * dt
+            # Swept and radius collision check
+            crossed = (prev_x - p.x) * (bolt["x"] - p.x) <= 0
+            close = abs(bolt["x"] - p.x) <= C.LIGHT_BOLT_HIT_RADIUS
+            if (crossed or close) and not bolt.get("hit"):
+                # Light Bolt is NOT avoided by jump (SPEC §3)
+                if p.parry_active > 0:
+                    # Parried: negate, +1 super, no stun (projectile ≠ melee)
+                    p.super_stacks = min(p.super_stacks + 1, C.SUPER_STACKS_REQUIRED)
+                    self._tick_reward += C.REWARD["parry"]
+                elif p.iframes == 0:
+                    p.hearts -= 1
+                    self._tick_reward += C.REWARD["heart_lost"]
+                    self._hearts_lost += 1
+                    if p.hearts <= 0:
+                        self._terminated = True
+                bolt["hit"] = True           # consumed, don't carry it forward
+            # Keep bolts that haven't left the arena and haven't hit
+            elif 0.0 <= bolt["x"] <= C.ARENA_W and not bolt.get("hit"):
+                new_bolts.append(bolt)
+        self._light_bolts = new_bolts
+
+        # ================================================================
         # Boss state machine
+
         # ================================================================
         # --- countdown any active timer ---
         if b.action_timer > 0:
@@ -330,11 +374,19 @@ class BossFightEnv(gym.Env):
                 b.ability_cd[aid] -= 1
 
         if b.state == BossState.WINDUP:
-            # Windup finished → transition to ATTACK
+            # Windup finished → transition to ATTACK (or spawn projectile)
             if b.action_timer == 0:
                 ab = C.ABILITY_FRAMES[b.current_ability_id]
-                b.state        = BossState.ATTACK
-                b.action_timer = ab["active"]
+                if b.current_ability_id == 4:
+                    # Light Bolt: projectile fired immediately, no active phase
+                    direction = 1.0 if p.x > b.x else -1.0
+                    self._light_bolts.append({"x": b.x, "dir": direction, "hit": False})
+                    b.state              = BossState.IDLE
+                    b.current_ability_id = 0
+                    b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+                else:
+                    b.state        = BossState.ATTACK
+                    b.action_timer = ab["active"]
 
         elif b.state == BossState.ATTACK:
             # --- Lightning Strike hit detection ---
@@ -381,16 +433,25 @@ class BossFightEnv(gym.Env):
                 b.x += direction * C.BOSS_SPEED * dt
                 b.x = float(np.clip(b.x, 0.0, C.ARENA_W))
 
-            # --- Ability decision (simplified: Lightning Strike only for now) ---
+            # --- Ability decision (abilities 1 and 4, spec-correct distance rules) ---
             if b.recovery_timer == 0:
-                # Lightning Strike: player within 100 u, ability off cooldown
+                candidates = []
+                # Lightning Strike: player within 100 u
                 if dist <= C.MELEE_TRIGGER_DIST and b.ability_cd[1] == 0:
-                    ab = C.ABILITY_FRAMES[1]
+                    candidates.append(1)
+                # Light Bolt: player beyond 150 u, unlocked (fight >= 4)
+                if (dist > C.BLINK_MIN_DIST and b.ability_cd[4] == 0
+                        and self.fight >= 4):
+                    candidates.append(4)
+
+                if candidates:
+                    chosen = int(self.np_random.choice(candidates))
+                    ab = C.ABILITY_FRAMES[chosen]
                     b.state              = BossState.WINDUP
-                    b.current_ability_id = 1
+                    b.current_ability_id = chosen
                     b.action_timer       = ab["windup"]
                     b.attack_hit_landed  = False
-                    b.ability_cd[1]      = ab["cooldown"]
+                    b.ability_cd[chosen] = ab["cooldown"]
                     self._boss_windup_total = ab["windup"]
 
     # ---- Action masks -----------------------------------------------------
@@ -421,13 +482,14 @@ class BossFightEnv(gym.Env):
             mask[Action.MOVE_LEFT]  = False
             mask[Action.MOVE_RIGHT] = False
 
-        # Attacks
-        mask[Action.LIGHT_ATTACK] = not not_actionable
-        mask[Action.HEAVY_ATTACK] = not not_actionable
+        # Attacks: blocked if not actionable or airborne (no air attacks)
+        mask[Action.LIGHT_ATTACK] = not not_actionable and not p.airborne
+        mask[Action.HEAVY_ATTACK] = not not_actionable and not p.airborne
 
-        # Dodge roll: needs stamina and cooldown clear; also blocked while not actionable
+        # Dodge roll: needs stamina and cooldown clear; blocked if not actionable or airborne
         mask[Action.DODGE_ROLL] = (
             not not_actionable
+            and not p.airborne
             and p.stamina >= C.ROLL_COST
             and p.roll_cd == 0
         )
@@ -435,14 +497,21 @@ class BossFightEnv(gym.Env):
         # Parry: needs cooldown clear; blocked while not actionable
         mask[Action.PARRY] = not not_actionable and p.parry_cd == 0
 
+        # Jump: blocked if already airborne or not actionable
+        mask[Action.JUMP] = not not_actionable and not p.airborne
+
         # Resources
         mask[Action.USE_SUPER] = (
             p.super_stacks >= C.SUPER_STACKS_REQUIRED
             and not not_actionable
+            and not p.airborne
         )
-        mask[Action.USE_FLASK] = p.flasks > 0 and p.hearts < p.max_hearts and not not_actionable
-
-        # TODO: JUMP when not actionable
+        mask[Action.USE_FLASK] = (
+            p.flasks > 0
+            and p.hearts < p.max_hearts
+            and not not_actionable
+            and not p.airborne
+        )
 
         return mask
 
@@ -481,8 +550,13 @@ class BossFightEnv(gym.Env):
             obs[_scalar_idx("heal_orbs_remaining")] = b.orbs_remaining / C.HEAL_ORB_COUNT
             obs[_scalar_idx("boss_blink_cd")]       = b.blink_cd_norm
 
-            # hazards (5) – zeroed until hazard simulation is added
+            # hazards (5)
             # spike_rel_x, spike_timer, proj_dark_rel_x, proj_light_rel_x, orb_parry_window
+            if self._light_bolts:
+                closest_bolt = min(self._light_bolts, key=lambda bolt: abs(bolt["x"] - p.x))
+                obs[_scalar_idx("proj_light_rel_x")] = np.clip((closest_bolt["x"] - p.x) / C.ARENA_W, -1.0, 1.0)
+            else:
+                obs[_scalar_idx("proj_light_rel_x")] = 0.0
 
             # context (8)
             obs[_scalar_idx("fight_index")] = self.fight / C.N_FIGHTS
