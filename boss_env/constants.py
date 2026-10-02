@@ -145,6 +145,13 @@ ABILITY_FRAMES: dict = {
     7: {"windup": sec(0.25), "active": sec(0.30),  "cooldown": sec(3.5)},   # Dual-Blade Frenzy
 }
 
-# ---- Projectile constants ------------------------------------------------
-LIGHT_BOLT_SPEED      = 600.0   # u/s (SPEC §5 ability table)
-LIGHT_BOLT_HIT_RADIUS = 15.0    # u – tolerance for hit detection on a point projectile
+# ---- Projectile and Hazard constants ---------------------------------------
+LIGHT_BOLT_SPEED        = 600.0   # u/s (SPEC §5 ability table)
+LIGHT_BOLT_HIT_RADIUS   = 15.0    # u – tolerance for hit detection on a point projectile
+
+DARK_SPIKES_RADIUS      = 70.0    # 140 u circle at player x when cast
+DARK_WAVE_SPEED         = 280.0   # u/s ground projectile
+DARK_WAVE_HIT_RADIUS    = 20.0    # u
+
+FRENZY_DASH_SPEED       = 500.0   # 150 u over 0.30 s dash
+FRENZY_STRIKE_INTERVAL  = 6       # 3 strikes x 0.10 s (6 frames each at 60 FPS)

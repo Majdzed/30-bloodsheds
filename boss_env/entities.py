@@ -169,6 +169,8 @@ class Boss:
 
     # --- hit tracking (prevents multi-hit within one active window) ---
     attack_hit_landed: bool = False
+    frenzy_strike_index: int = 0  # 0, 1, 2 for the 3 frenzy strikes
+    dash_dir: float = 1.0         # dash direction for Dual-Blade Frenzy
 
     # ---- derived / helpers ------------------------------------------------
 

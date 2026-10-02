@@ -101,8 +101,10 @@ class BossFightEnv(gym.Env):
         # Per-episode stats (for info dict)
         self._hearts_lost: int   = 0
         self._damage_dealt: float = 0.0
-        # Active Light Bolt projectiles: each is {"x": float, "dir": +1 or -1}
+        # Active projectiles and hazards
         self._light_bolts: list = []
+        self._dark_waves: list = []
+        self._dark_spikes: list = []
 
     # ---- gauntlet control -------------------------------------------------
     def set_fight(self, fight: int) -> None:
@@ -119,6 +121,8 @@ class BossFightEnv(gym.Env):
         self._hearts_lost   = 0
         self._damage_dealt  = 0.0
         self._light_bolts   = []
+        self._dark_waves    = []
+        self._dark_spikes   = []
 
         max_hp = C.boss_max_hp(self.fight)
         max_hearts = C.max_hearts_for_fight(self.fight, self.upgrade)
@@ -340,19 +344,18 @@ class BossFightEnv(gym.Env):
         dist = abs(b.x - p.x)
 
         # ================================================================
-        # Light Bolt projectile physics
+        # Projectile and Hazard physics
         # ================================================================
+        # --- Light Bolt (Ability 4: High projectile, 600 u/s) ---
         new_bolts = []
         for bolt in self._light_bolts:
             prev_x = bolt["x"]
             bolt["x"] += bolt["dir"] * C.LIGHT_BOLT_SPEED * dt
-            # Swept and radius collision check
             crossed = (prev_x - p.x) * (bolt["x"] - p.x) <= 0
             close = abs(bolt["x"] - p.x) <= C.LIGHT_BOLT_HIT_RADIUS
             if (crossed or close) and not bolt.get("hit"):
                 # Light Bolt is NOT avoided by jump (SPEC §3)
                 if p.parry_active > 0:
-                    # Parried: negate, +1 super, no stun (projectile ≠ melee)
                     p.super_stacks = min(p.super_stacks + 1, C.SUPER_STACKS_REQUIRED)
                     self._tick_reward += C.REWARD["parry"]
                 elif p.iframes == 0:
@@ -361,11 +364,58 @@ class BossFightEnv(gym.Env):
                     self._hearts_lost += 1
                     if p.hearts <= 0:
                         self._terminated = True
-                bolt["hit"] = True           # consumed, don't carry it forward
-            # Keep bolts that haven't left the arena and haven't hit
+                bolt["hit"] = True
             elif 0.0 <= bolt["x"] <= C.ARENA_W and not bolt.get("hit"):
                 new_bolts.append(bolt)
         self._light_bolts = new_bolts
+
+        # --- Dark Wave (Ability 3: Ground projectile, 280 u/s) ---
+        new_waves = []
+        for wave in self._dark_waves:
+            prev_x = wave["x"]
+            wave["x"] += wave["dir"] * C.DARK_WAVE_SPEED * dt
+            crossed = (prev_x - p.x) * (wave["x"] - p.x) <= 0
+            close = abs(wave["x"] - p.x) <= C.DARK_WAVE_HIT_RADIUS
+            if (crossed or close) and not wave.get("hit"):
+                # Ground hit: Jump clears it! (SPEC §3)
+                if p.airborne:
+                    pass
+                elif p.parry_active > 0:
+                    p.super_stacks = min(p.super_stacks + 1, C.SUPER_STACKS_REQUIRED)
+                    self._tick_reward += C.REWARD["parry"]
+                elif p.iframes == 0:
+                    p.hearts -= 1
+                    self._tick_reward += C.REWARD["heart_lost"]
+                    self._hearts_lost += 1
+                    if p.hearts <= 0:
+                        self._terminated = True
+                wave["hit"] = True
+            elif 0.0 <= wave["x"] <= C.ARENA_W and not wave.get("hit"):
+                new_waves.append(wave)
+        self._dark_waves = new_waves
+
+        # --- Dark Spikes (Ability 2: 140 u zone at player x when cast) ---
+        new_spikes = []
+        for spike in self._dark_spikes:
+            if spike["warning_timer"] > 0:
+                spike["warning_timer"] -= 1
+                new_spikes.append(spike)
+            elif spike["active_timer"] > 0:
+                spike["active_timer"] -= 1
+                # Spikes erupt: Jump clears ground hit! Cannot be parried.
+                if abs(p.x - spike["x"]) <= C.DARK_SPIKES_RADIUS and not spike["hit_landed"]:
+                    if p.airborne or p.iframes > 0:
+                        pass
+                    else:
+                        p.hearts -= 1
+                        self._tick_reward += C.REWARD["heart_lost"]
+                        self._hearts_lost += 1
+                        if p.hearts <= 0:
+                            self._terminated = True
+                    spike["hit_landed"] = True
+                if spike["active_timer"] > 0:
+                    new_spikes.append(spike)
+        self._dark_spikes = new_spikes
 
         # ================================================================
         # Boss state machine
@@ -395,16 +445,40 @@ class BossFightEnv(gym.Env):
                 b.x = float(np.clip(target_x, 0.0, C.ARENA_W))
                 b.blink_pending = False
 
-            # Windup finished → transition to ATTACK (or spawn projectile)
+            # Windup finished → transition to ATTACK (or spawn projectile / hazard)
             if b.action_timer == 0:
                 ab = C.ABILITY_FRAMES[b.current_ability_id]
-                if b.current_ability_id == 4:
+                if b.current_ability_id == 2:
+                    # Dark Spikes: spawns warning zone at player x
+                    self._dark_spikes.append({
+                        "x": p.x,
+                        "warning_timer": C.sec(0.80),
+                        "active_timer": C.sec(0.25),
+                        "hit_landed": False,
+                    })
+                    b.state              = BossState.IDLE
+                    b.current_ability_id = 0
+                    b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+                elif b.current_ability_id == 3:
+                    # Dark Wave: ground projectile travels at 280 u/s
+                    direction = 1.0 if p.x > b.x else -1.0
+                    self._dark_waves.append({"x": b.x, "dir": direction, "hit": False})
+                    b.state              = BossState.IDLE
+                    b.current_ability_id = 0
+                    b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+                elif b.current_ability_id == 4:
                     # Light Bolt: projectile fired immediately, no active phase
                     direction = 1.0 if p.x > b.x else -1.0
                     self._light_bolts.append({"x": b.x, "dir": direction, "hit": False})
                     b.state              = BossState.IDLE
                     b.current_ability_id = 0
                     b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+                elif b.current_ability_id == 7:
+                    # Dual-Blade Frenzy: 3 strikes x 0.10s (18 frames total) with 150u dash
+                    b.state               = BossState.ATTACK
+                    b.action_timer        = ab["active"]
+                    b.dash_dir            = 1.0 if p.x > b.x else -1.0
+                    b.frenzy_strike_index = 0
                 else:
                     b.state        = BossState.ATTACK
                     b.action_timer = ab["active"]
@@ -412,25 +486,45 @@ class BossFightEnv(gym.Env):
         elif b.state == BossState.ATTACK:
             # --- Lightning Strike hit detection ---
             if b.current_ability_id == 1:
-                # Damage fires on the FIRST frame of the active window
-                # Use a one-shot flag on Boss to avoid multi-hitting.
                 if not b.attack_hit_landed:
                     if dist <= 120.0:
                         if p.parry_active > 0:
-                            # --- Successful parry ---
-                            # Hit is negated; +1 super stack; melee → stun boss 0.5 s
                             p.super_stacks = min(p.super_stacks + 1, C.SUPER_STACKS_REQUIRED)
                             self._tick_reward += C.REWARD["parry"]
-                            # Lightning Strike is melee → stun
                             b.state        = BossState.STUN
                             b.action_timer = C.sec(0.5)
-                        elif p.iframes == 0:   # i-frames block all non-Orb hits
+                        elif p.iframes == 0:
                             p.hearts -= 1
                             self._tick_reward += C.REWARD["heart_lost"]
                             self._hearts_lost += 1
                             if p.hearts <= 0:
                                 self._terminated = True
                     b.attack_hit_landed = True
+
+            # --- Dual-Blade Frenzy (7): 3 strikes x 0.10s (frames 18, 12, 6) + dash ---
+            elif b.current_ability_id == 7:
+                # Dash forward during the active phase
+                b.x += b.dash_dir * C.FRENZY_DASH_SPEED * dt
+                b.x = float(np.clip(b.x, 0.0, C.ARENA_W))
+                dist = abs(b.x - p.x)
+
+                # 3 strikes spaced across the 18-frame active window (each 6 frames = 0.10s)
+                strike_frames = (17, 11, 5)
+                if b.action_timer in strike_frames:
+                    if dist <= 120.0:
+                        if p.parry_active > 0:
+                            # Parry negates one strike and stuns boss!
+                            p.super_stacks = min(p.super_stacks + 1, C.SUPER_STACKS_REQUIRED)
+                            self._tick_reward += C.REWARD["parry"]
+                            b.state        = BossState.STUN
+                            b.action_timer = C.sec(0.5)
+                        elif p.iframes == 0:
+                            # Jump does NOT avoid frenzy; roll i-frames do
+                            p.hearts -= 1
+                            self._tick_reward += C.REWARD["heart_lost"]
+                            self._hearts_lost += 1
+                            if p.hearts <= 0:
+                                self._terminated = True
 
             # Active phase finished → recovery
             if b.action_timer == 0:
@@ -454,16 +548,24 @@ class BossFightEnv(gym.Env):
                 b.x += direction * C.BOSS_SPEED * dt
                 b.x = float(np.clip(b.x, 0.0, C.ARENA_W))
 
-            # --- Ability decision (abilities 1 and 4, spec-correct distance rules) ---
+            # --- Ability decision (scripted per SPEC §5) ---
             if b.recovery_timer == 0:
                 candidates = []
-                # Lightning Strike: player within 100 u (or beyond 150 u with blink ready)
+                # Lightning Strike (1): player within 100 u (or beyond 150 u with blink ready)
                 if (dist <= C.MELEE_TRIGGER_DIST or (dist > C.BLINK_MIN_DIST and b.blink_cd == 0)) and b.ability_cd[1] == 0:
                     candidates.append(1)
-                # Light Bolt: player beyond 150 u, unlocked (fight >= 4)
-                if (dist > C.BLINK_MIN_DIST and b.ability_cd[4] == 0
-                        and self.fight >= 4):
+                # Dark Spikes (2): any distance, unlocked at fight >= 8
+                if self.fight >= 8 and b.ability_cd[2] == 0:
+                    candidates.append(2)
+                # Dark Wave (3): player beyond 150 u, unlocked at fight >= 12
+                if dist > C.BLINK_MIN_DIST and self.fight >= 12 and b.ability_cd[3] == 0:
+                    candidates.append(3)
+                # Light Bolt (4): player beyond 150 u, unlocked at fight >= 4
+                if dist > C.BLINK_MIN_DIST and self.fight >= 4 and b.ability_cd[4] == 0:
                     candidates.append(4)
+                # Dual-Blade Frenzy (7): player between 100 u and 300 u, unlocked at fight >= 16
+                if 100.0 <= dist <= 300.0 and self.fight >= 16 and b.ability_cd[7] == 0:
+                    candidates.append(7)
 
                 if candidates:
                     chosen = int(self.np_random.choice(candidates))
@@ -577,12 +679,31 @@ class BossFightEnv(gym.Env):
             obs[_scalar_idx("boss_blink_cd")]       = b.blink_cd_norm
 
             # hazards (5)
-            # spike_rel_x, spike_timer, proj_dark_rel_x, proj_light_rel_x, orb_parry_window
+            # spike_rel_x, spike_timer
+            if self._dark_spikes:
+                closest_spike = min(self._dark_spikes, key=lambda s: abs(s["x"] - p.x))
+                obs[_scalar_idx("spike_rel_x")] = np.clip((closest_spike["x"] - p.x) / C.ARENA_W, -1.0, 1.0)
+                obs[_scalar_idx("spike_timer")] = closest_spike["warning_timer"] / C.sec(0.80)
+            else:
+                obs[_scalar_idx("spike_rel_x")] = 0.0
+                obs[_scalar_idx("spike_timer")] = 0.0
+
+            # proj_dark_rel_x
+            if self._dark_waves:
+                closest_wave = min(self._dark_waves, key=lambda w: abs(w["x"] - p.x))
+                obs[_scalar_idx("proj_dark_rel_x")] = np.clip((closest_wave["x"] - p.x) / C.ARENA_W, -1.0, 1.0)
+            else:
+                obs[_scalar_idx("proj_dark_rel_x")] = 0.0
+
+            # proj_light_rel_x
             if self._light_bolts:
                 closest_bolt = min(self._light_bolts, key=lambda bolt: abs(bolt["x"] - p.x))
                 obs[_scalar_idx("proj_light_rel_x")] = np.clip((closest_bolt["x"] - p.x) / C.ARENA_W, -1.0, 1.0)
             else:
                 obs[_scalar_idx("proj_light_rel_x")] = 0.0
+
+            # orb_parry_window (filled when ability 6 is active)
+            obs[_scalar_idx("orb_parry_window")] = 0.0
 
             # context (8)
             obs[_scalar_idx("fight_index")] = self.fight / C.N_FIGHTS
