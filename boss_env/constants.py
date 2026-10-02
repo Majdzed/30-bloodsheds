@@ -155,3 +155,8 @@ DARK_WAVE_HIT_RADIUS    = 20.0    # u
 
 FRENZY_DASH_SPEED       = 500.0   # 150 u over 0.30 s dash
 FRENZY_STRIKE_INTERVAL  = 6       # 3 strikes x 0.10 s (6 frames each at 60 FPS)
+
+DARK_ORB_SPEED          = 400.0   # 400 u/s (SPEC §5 ability table)
+DARK_ORB_HIT_RADIUS     = 25.0    # u
+DARK_ORB_PARRY_DIST     = 80.0    # u (distance where orb_parry_window obs becomes 1.0)
+

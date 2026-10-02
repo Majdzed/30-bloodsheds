@@ -105,6 +105,8 @@ class BossFightEnv(gym.Env):
         self._light_bolts: list = []
         self._dark_waves: list = []
         self._dark_spikes: list = []
+        self._dark_orbs: list = []
+        self._heal_orbs: list = []
 
     # ---- gauntlet control -------------------------------------------------
     def set_fight(self, fight: int) -> None:
@@ -123,6 +125,8 @@ class BossFightEnv(gym.Env):
         self._light_bolts   = []
         self._dark_waves    = []
         self._dark_spikes   = []
+        self._dark_orbs     = []
+        self._heal_orbs     = []
 
         max_hp = C.boss_max_hp(self.fight)
         max_hearts = C.max_hearts_for_fight(self.fight, self.upgrade)
@@ -240,6 +244,20 @@ class BossFightEnv(gym.Env):
                             b.hp = 0
                             self._terminated = True
                     p.recovery_timer = C.sec(self.weapon.heavy_recovery_s)
+
+                # Check orb destruction (Siphon Heal mechanic)
+                if self._heal_orbs:
+                    atk_range = self.weapon.light_range if p.pending_attack_id == 1 else self.weapon.heavy_range
+                    in_range = [ox for ox in self._heal_orbs if abs(ox - p.x) <= atk_range]
+                    if in_range:
+                        target = min(in_range, key=lambda ox: abs(ox - p.x))
+                        self._heal_orbs.remove(target)
+                        b.orbs_remaining = len(self._heal_orbs)
+                        if b.state == BossState.HEAL and b.orbs_remaining == 0:
+                            b.state = BossState.STUN
+                            b.action_timer = C.sec(1.0)
+                            self._tick_reward += C.REWARD["heal_interrupted"]
+
                 p.pending_attack_id = 0
                 p.state = PlayerState.IDLE    # recovery phase: player is IDLE but locked by recovery_timer
 
@@ -273,6 +291,16 @@ class BossFightEnv(gym.Env):
                     if b.hp <= 0:
                         b.hp = 0
                         self._terminated = True
+
+                # Super destroys all heal orbs in range
+                if self._heal_orbs:
+                    self._heal_orbs = [ox for ox in self._heal_orbs if abs(ox - p.x) > 200.0]
+                    b.orbs_remaining = len(self._heal_orbs)
+                    if b.state == BossState.HEAL and b.orbs_remaining == 0:
+                        b.state = BossState.STUN
+                        b.action_timer = C.sec(1.0)
+                        self._tick_reward += C.REWARD["heal_interrupted"]
+
                 p.super_stacks = 0
                 p.state        = PlayerState.IDLE
 
@@ -417,6 +445,30 @@ class BossFightEnv(gym.Env):
                     new_spikes.append(spike)
         self._dark_spikes = new_spikes
 
+        # --- Ultimate Dark Orb (Ability 6: 400 u/s, arena-height, 3 hearts, cannot dodge, must parry) ---
+        new_orbs = []
+        for orb in self._dark_orbs:
+            prev_x = orb["x"]
+            orb["x"] += orb["dir"] * C.DARK_ORB_SPEED * dt
+            crossed = (prev_x - p.x) * (orb["x"] - p.x) <= 0
+            close = abs(orb["x"] - p.x) <= C.DARK_ORB_HIT_RADIUS
+            if (crossed or close) and not orb.get("hit"):
+                if p.parry_active > 0:
+                    # Parried! Negate hit, +1 super stack (no boss stun, ranged/fullscreen)
+                    p.super_stacks = min(p.super_stacks + 1, C.SUPER_STACKS_REQUIRED)
+                    self._tick_reward += C.REWARD["parry"]
+                else:
+                    # Roll i-frames do NOT avoid Dark Orb! Jump does NOT avoid it! (SPEC §3)
+                    p.hearts -= 3
+                    self._tick_reward += 3.0 * C.REWARD["heart_lost"]
+                    self._hearts_lost += 3
+                    if p.hearts <= 0:
+                        self._terminated = True
+                orb["hit"] = True
+            elif 0.0 <= orb["x"] <= C.ARENA_W and not orb.get("hit"):
+                new_orbs.append(orb)
+        self._dark_orbs = new_orbs
+
         # ================================================================
         # Boss state machine
 
@@ -470,6 +522,25 @@ class BossFightEnv(gym.Env):
                     # Light Bolt: projectile fired immediately, no active phase
                     direction = 1.0 if p.x > b.x else -1.0
                     self._light_bolts.append({"x": b.x, "dir": direction, "hit": False})
+                    b.state              = BossState.IDLE
+                    b.current_ability_id = 0
+                    b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+                elif b.current_ability_id == 5:
+                    # Siphon Heal: channel begins, spawn 4 orbs around boss
+                    self._heal_orbs = [
+                        float(np.clip(b.x - 80.0, 10.0, C.ARENA_W - 10.0)),
+                        float(np.clip(b.x - 40.0, 10.0, C.ARENA_W - 10.0)),
+                        float(np.clip(b.x + 40.0, 10.0, C.ARENA_W - 10.0)),
+                        float(np.clip(b.x + 80.0, 10.0, C.ARENA_W - 10.0)),
+                    ]
+                    b.orbs_remaining    = len(self._heal_orbs)
+                    b.orb_consume_timer = C.sec(C.HEAL_ORB_INTERVAL_S)
+                    b.state             = BossState.HEAL
+                    b.action_timer      = ab["active"]
+                elif b.current_ability_id == 6:
+                    # Ultimate Dark Orb: sweep orb across arena
+                    direction = 1.0 if p.x > b.x else -1.0
+                    self._dark_orbs.append({"x": b.x, "dir": direction, "hit": False})
                     b.state              = BossState.IDLE
                     b.current_ability_id = 0
                     b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
@@ -533,6 +604,23 @@ class BossFightEnv(gym.Env):
                 b.attack_hit_landed  = False
                 b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
 
+        elif b.state == BossState.HEAL:
+            # Siphon Heal channel: boss stays in place, consumes 1 orb every 0.75s (+15 HP)
+            if b.orb_consume_timer > 0:
+                b.orb_consume_timer -= 1
+
+            if b.orb_consume_timer == 0:
+                if len(self._heal_orbs) > 0:
+                    self._heal_orbs.pop(0)
+                    b.orbs_remaining = len(self._heal_orbs)
+                    b.hp = min(b.max_hp, b.hp + C.HEAL_PER_ORB)
+                    b.orb_consume_timer = C.sec(C.HEAL_ORB_INTERVAL_S)
+
+            if b.action_timer == 0 or b.orbs_remaining == 0:
+                b.state              = BossState.IDLE
+                b.current_ability_id = 0
+                b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+
         elif b.state == BossState.STUN:
             # Boss stunned: wait out action_timer, then recover
             if b.action_timer == 0:
@@ -550,25 +638,34 @@ class BossFightEnv(gym.Env):
 
             # --- Ability decision (scripted per SPEC §5) ---
             if b.recovery_timer == 0:
-                candidates = []
-                # Lightning Strike (1): player within 100 u (or beyond 150 u with blink ready)
-                if (dist <= C.MELEE_TRIGGER_DIST or (dist > C.BLINK_MIN_DIST and b.blink_cd == 0)) and b.ability_cd[1] == 0:
-                    candidates.append(1)
-                # Dark Spikes (2): any distance, unlocked at fight >= 8
-                if self.fight >= 8 and b.ability_cd[2] == 0:
-                    candidates.append(2)
-                # Dark Wave (3): player beyond 150 u, unlocked at fight >= 12
-                if dist > C.BLINK_MIN_DIST and self.fight >= 12 and b.ability_cd[3] == 0:
-                    candidates.append(3)
-                # Light Bolt (4): player beyond 150 u, unlocked at fight >= 4
-                if dist > C.BLINK_MIN_DIST and self.fight >= 4 and b.ability_cd[4] == 0:
-                    candidates.append(4)
-                # Dual-Blade Frenzy (7): player between 100 u and 300 u, unlocked at fight >= 16
-                if 100.0 <= dist <= 300.0 and self.fight >= 16 and b.ability_cd[7] == 0:
-                    candidates.append(7)
+                # 1. Siphon Heal: unlocked (fight >= 21), ready, and boss HP < 60%
+                if (self.fight >= 21 and b.ability_cd[5] == 0
+                        and (b.hp / b.max_hp) < C.HEAL_TRIGGER_HP_FRACTION):
+                    chosen = 5
+                else:
+                    candidates = []
+                    # Lightning Strike (1): player within 100 u (or beyond 150 u with blink ready)
+                    if (dist <= C.MELEE_TRIGGER_DIST or (dist > C.BLINK_MIN_DIST and b.blink_cd == 0)) and b.ability_cd[1] == 0:
+                        candidates.append(1)
+                    # Dark Spikes (2): any distance, unlocked at fight >= 8
+                    if self.fight >= 8 and b.ability_cd[2] == 0:
+                        candidates.append(2)
+                    # Dark Wave (3): player beyond 150 u, unlocked at fight >= 12
+                    if dist > C.BLINK_MIN_DIST and self.fight >= 12 and b.ability_cd[3] == 0:
+                        candidates.append(3)
+                    # Light Bolt (4): player beyond 150 u, unlocked at fight >= 4
+                    if dist > C.BLINK_MIN_DIST and self.fight >= 4 and b.ability_cd[4] == 0:
+                        candidates.append(4)
+                    # Ultimate Dark Orb (6): any distance, unlocked at fight >= 26
+                    if self.fight >= 26 and b.ability_cd[6] == 0:
+                        candidates.append(6)
+                    # Dual-Blade Frenzy (7): player between 100 u and 300 u, unlocked at fight >= 16
+                    if 100.0 <= dist <= 300.0 and self.fight >= 16 and b.ability_cd[7] == 0:
+                        candidates.append(7)
 
-                if candidates:
-                    chosen = int(self.np_random.choice(candidates))
+                    chosen = int(self.np_random.choice(candidates)) if candidates else 0
+
+                if chosen > 0:
                     ab = C.ABILITY_FRAMES[chosen]
                     b.state              = BossState.WINDUP
                     b.current_ability_id = chosen
@@ -703,7 +800,11 @@ class BossFightEnv(gym.Env):
                 obs[_scalar_idx("proj_light_rel_x")] = 0.0
 
             # orb_parry_window (filled when ability 6 is active)
-            obs[_scalar_idx("orb_parry_window")] = 0.0
+            if self._dark_orbs:
+                closest_orb = min(self._dark_orbs, key=lambda o: abs(o["x"] - p.x))
+                obs[_scalar_idx("orb_parry_window")] = 1.0 if abs(closest_orb["x"] - p.x) <= C.DARK_ORB_PARRY_DIST else 0.0
+            else:
+                obs[_scalar_idx("orb_parry_window")] = 0.0
 
             # context (8)
             obs[_scalar_idx("fight_index")] = self.fight / C.N_FIGHTS
