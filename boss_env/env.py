@@ -437,8 +437,8 @@ class BossFightEnv(gym.Env):
                 p.vy      = 0.0
                 p.airborne = False
 
-        # ---- Player horizontal movement (only when idle, on ground, not recovering) ----
-        if p.state == PlayerState.IDLE and p.recovery_timer == 0 and not p.airborne:
+        # ---- Player horizontal movement (when idle, not recovering; allowed both on ground and in air) ----
+        if p.state == PlayerState.IDLE and p.recovery_timer == 0:
             if action == Action.MOVE_LEFT:
                 p.x -= C.PLAYER_SPEED * dt
             elif action == Action.MOVE_RIGHT:

@@ -56,8 +56,8 @@ for step in range(30):
 
     if p.airborne:
         airborne_steps += 1
-        # No horizontal steering during jump: x should not change
-        assert abs(p.x - start_x) < 1e-4, f"Player steered while airborne! x moved from {start_x} to {p.x}"
+        # Horizontal steering during jump: x should move left when Action.MOVE_LEFT is taken
+        assert p.x < start_x, f"Player did not steer left while airborne! x={p.x}, start_x={start_x}"
         last_airborne_x = p.x
     else:
         break
@@ -65,7 +65,7 @@ for step in range(30):
 airtime_s = (airborne_steps * env.frame_skip) / C.FPS
 print(f"  Jump apex reached: {max_y:.2f} u (expected ~{C.JUMP_APEX:.1f} u)")
 print(f"  Jump airtime: {airtime_s:.2f} s ({airborne_steps} steps, expected ~{C.JUMP_AIRTIME_S:.2f} s)")
-print(f"  No steering verified: player_x remained {last_airborne_x:.2f}")
+print(f"  Aerial steering verified: player steered left to {last_airborne_x:.2f} u")
 
 assert abs(max_y - C.JUMP_APEX) < 5.0, f"Apex {max_y:.2f} too far from {C.JUMP_APEX}"
 assert abs(airtime_s - C.JUMP_AIRTIME_S) < 0.1, f"Airtime {airtime_s:.2f} too far from {C.JUMP_AIRTIME_S}"
