@@ -437,8 +437,8 @@ class BossFightEnv(gym.Env):
                 p.vy      = 0.0
                 p.airborne = False
 
-        # ---- Player horizontal movement (when idle, not recovering; allowed both on ground and in air) ----
-        if p.state == PlayerState.IDLE and p.recovery_timer == 0:
+        # ---- Player horizontal movement (allowed when idle or attacking; locked during roll, parry, super, drink) ----
+        if p.state not in (PlayerState.ROLL, PlayerState.PARRY, PlayerState.SUPER, PlayerState.DRINK):
             if action == Action.MOVE_LEFT:
                 p.x -= C.PLAYER_SPEED * dt
             elif action == Action.MOVE_RIGHT:
@@ -778,8 +778,14 @@ class BossFightEnv(gym.Env):
             or p.recovery_timer > 0
         )
 
-        # Movement also blocked while not actionable
-        if not_actionable:
+        # Movement blocked only during locked actions (roll, parry, super, drink)
+        movement_locked = p.state in (
+            PlayerState.ROLL,
+            PlayerState.PARRY,
+            PlayerState.SUPER,
+            PlayerState.DRINK,
+        )
+        if movement_locked:
             mask[Action.MOVE_LEFT]  = False
             mask[Action.MOVE_RIGHT] = False
 
