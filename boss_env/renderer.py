@@ -884,25 +884,12 @@ class Renderer:
         facing_boss = 1 if b.x > p.x else -1
         if p.state == PlayerState.ATTACK:
             if env.weapon.uses_ammo:
-                # Revolver bullet tracers
-                shot_y = psy - ph // 2 - 5
-                if p.pending_attack_id == 2:
-                    # Piercing heavy shot: fullscreen cyan beam
-                    target_x = self.arena_right if facing_boss > 0 else self.arena_left
-                    pygame.draw.line(self.screen, (100, 240, 255), (psx, shot_y), (target_x, shot_y), 6)
-                    pygame.draw.line(self.screen, (255, 255, 255), (psx, shot_y), (target_x, shot_y), 2)
-                else:
-                    # Light attack bullet tracer
-                    target_x = self.arena_right if facing_boss > 0 else self.arena_left
-                    pygame.draw.line(self.screen, (255, 230, 100), (psx, shot_y), (target_x, shot_y), 3)
+                self._draw_revolver_bullet(p, b, psx, psy, ph, bsx, bsy, facing_boss, now_ticks)
 
         # Player Super visual
         if p.state == PlayerState.SUPER:
             if env.weapon.uses_ammo:
-                # Ultra Plasma Shot: giant fullscreen laser
-                beam_y = psy - ph // 2
-                pygame.draw.line(self.screen, (255, 80, 120), (0, beam_y), (self.width, beam_y), 28)
-                pygame.draw.line(self.screen, (255, 255, 255), (0, beam_y), (self.width, beam_y), 10)
+                self._draw_red_blast(p, b, psx, psy, ph, bsx, bsy, facing_boss, now_ticks)
             else:
                 # Blood Katana: cinematic blood awakening, crescent wave & dimensional slashes
                 self._draw_blood_katana(env, p, b, psx, psy, facing_boss, now_ticks)
@@ -1527,6 +1514,150 @@ class Renderer:
                    oy + int(math.sin((ang1 + ang2) / 2) * (pulse_r + random.randint(-10, 10))))
             p2 = (ox + int(math.cos(ang2) * pulse_r), oy + int(math.sin(ang2) * pulse_r))
             pygame.draw.lines(self.screen, (230, 180, 255), False, [p1, mid, p2], 2)
+
+    def _draw_revolver_bullet(self, p, b, psx: int, psy: int, ph: int, bsx: int, bsy: int, facing_boss: int, now_ticks: int):
+        """Draws an animated golden-yellow bullet projectile with tracer slipstream and impact sparks."""
+        barrel_x = psx + facing_boss * 34
+        shot_y = psy - 42
+
+        # Target: toward the boss or arena boundary
+        if (bsx - barrel_x) * facing_boss > 0:
+            target_x = bsx
+        else:
+            target_x = self.arena_right if facing_boss > 0 else self.arena_left
+
+        is_heavy = (getattr(p, "pending_attack_id", 1) == 2)
+        total_windup = max(1, C.sec(C.WEAPONS["revolver"].heavy_windup_s if is_heavy else C.WEAPONS["revolver"].light_windup_s))
+        progress = max(0.0, min(1.0, 1.0 - (p.action_timer / total_windup)))
+
+        # High-speed flight trajectory
+        fly_p = min(1.0, progress * 1.5)
+        dist = abs(target_x - barrel_x)
+        cur_x = barrel_x + facing_boss * (dist * fly_p)
+
+        # 1. Slipstream tracer trail
+        trail_len = min(50 if not is_heavy else 85, abs(cur_x - barrel_x))
+        if trail_len > 4:
+            tail_x = cur_x - facing_boss * trail_len
+            trail_col_outer = (255, 175, 30) if not is_heavy else (100, 230, 255)
+            trail_col_core = (255, 245, 160) if not is_heavy else (240, 255, 255)
+            trail_w = 4 if not is_heavy else 6
+            pygame.draw.line(self.screen, trail_col_outer, (tail_x, shot_y), (cur_x, shot_y), trail_w)
+            pygame.draw.line(self.screen, trail_col_core, (tail_x + facing_boss * int(trail_len * 0.4), shot_y), (cur_x, shot_y), 2)
+
+        # 2. Yellow bullet body (golden cartridge with aerodynamic nose)
+        bw = 18 if not is_heavy else 26
+        bh = 7 if not is_heavy else 10
+        bx = int(cur_x if facing_boss > 0 else cur_x - bw)
+        bullet_rect = pygame.Rect(bx, int(shot_y - bh // 2), bw, bh)
+
+        body_col = (255, 215, 30) if not is_heavy else (80, 220, 255)
+        rim_col = (205, 150, 20) if not is_heavy else (40, 150, 220)
+        core_col = (255, 255, 240)
+
+        pygame.draw.ellipse(self.screen, rim_col, (bx - 1, int(shot_y - bh // 2 - 1), bw + 2, bh + 2))
+        pygame.draw.ellipse(self.screen, body_col, bullet_rect)
+        pygame.draw.ellipse(self.screen, core_col, (bx + 2, int(shot_y - 1), bw - 4, 3 if not is_heavy else 4))
+
+        # Pointed bullet nose
+        nose_x = int(cur_x + facing_boss * (bw // 2 + (4 if not is_heavy else 6)))
+        nose_base_x = int(cur_x + facing_boss * (bw // 2 - 1))
+        pts = [
+            (nose_base_x, int(shot_y - bh // 2)),
+            (nose_base_x, int(shot_y + bh // 2)),
+            (nose_x, int(shot_y))
+        ]
+        pygame.draw.polygon(self.screen, body_col, pts)
+        pygame.draw.polygon(self.screen, core_col, pts, 1)
+
+        # 3. Trailing hot embers / sparks
+        for _ in range(2 if not is_heavy else 4):
+            spk_ox = random.uniform(5, 30)
+            spk_oy = random.uniform(-4, 4)
+            spk_x = int(cur_x - facing_boss * spk_ox)
+            spk_y = int(shot_y + spk_oy)
+            pygame.draw.circle(self.screen, (255, 220, 80), (spk_x, spk_y), 1)
+
+        # 4. Impact sparks when bullet reaches target
+        if fly_p >= 0.95 and abs(target_x - bsx) < 20:
+            for _ in range(4):
+                ix = int(bsx + random.uniform(-10, 10))
+                iy = int(shot_y + random.uniform(-10, 10))
+                pygame.draw.circle(self.screen, (255, 235, 120), (ix, iy), random.randint(1, 3))
+
+    def _draw_red_blast(self, p, b, psx: int, psy: int, ph: int, bsx: int, bsy: int, facing_boss: int, now_ticks: int):
+        """Draws a colossal high-power red blast wave shot from the Hunter's rifle."""
+        total_frames = max(1, C.sec(C.WEAPONS["revolver"].super_duration_s))
+        progress = max(0.0, min(1.0, 1.0 - (p.action_timer / total_frames)))
+
+        barrel_x = psx + facing_boss * 34
+        shot_y = psy - 42
+        target_x = self.width + 120 if facing_boss > 0 else -120
+
+        # Rapidly expanding blast wave
+        dist = abs(target_x - barrel_x)
+        blast_reach = min(dist, int(dist * min(1.0, progress * 3.0)))
+        end_x = barrel_x + facing_boss * blast_reach
+
+        # 1. Screen flash on initial shot ignition
+        if progress < 0.25:
+            flash_alpha = int(55 * (1.0 - progress / 0.25))
+            flash = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            flash.fill((230, 20, 40, flash_alpha))
+            self.screen.blit(flash, (0, 0))
+
+        # 2. Barrel Muzzle Blast Flare
+        pygame.draw.circle(self.screen, (230, 20, 40), (barrel_x, shot_y), 28)
+        pygame.draw.circle(self.screen, (255, 60, 80), (barrel_x, shot_y), 18)
+        pygame.draw.circle(self.screen, (255, 235, 235), (barrel_x, shot_y), 9)
+
+        # Muzzle blast forward cone
+        cone_tip_x = barrel_x + facing_boss * 35
+        cone_pts = [
+            (barrel_x, shot_y - 20),
+            (barrel_x, shot_y + 20),
+            (cone_tip_x, shot_y)
+        ]
+        pygame.draw.polygon(self.screen, (255, 70, 90), cone_pts)
+
+        # 3. Main Red Blast Beam
+        # Outer Crimson Roar
+        beam_w_outer = int(36 + 6 * math.sin(now_ticks * 0.08))
+        pygame.draw.line(self.screen, (215, 15, 35), (barrel_x, shot_y), (end_x, shot_y), beam_w_outer)
+        # Mid Ruby Fire
+        beam_w_mid = int(22 + 4 * math.sin(now_ticks * 0.08))
+        pygame.draw.line(self.screen, (255, 50, 70), (barrel_x, shot_y), (end_x, shot_y), beam_w_mid)
+        # Core White-Hot Ray
+        pygame.draw.line(self.screen, (255, 240, 240), (barrel_x, shot_y), (end_x, shot_y), 8)
+
+        # 4. Shockwave rings expanding along the blast
+        for step in range(70, blast_reach, 110):
+            rx = barrel_x + facing_boss * step
+            rw = int(24 + 10 * math.sin(step * 0.08 + now_ticks * 0.06))
+            rh = int(rw * 1.6)
+            r_rect = pygame.Rect(rx - 8, shot_y - rh // 2, 16, rh)
+            pygame.draw.ellipse(self.screen, (255, 130, 150), r_rect, 3)
+
+        # 5. Violent red crackling electric sparks
+        for _ in range(5):
+            ox = random.randint(10, max(20, blast_reach))
+            sx1 = barrel_x + facing_boss * ox
+            sy1 = shot_y + random.randint(-14, 14)
+            sx2 = sx1 + facing_boss * random.randint(-15, 15)
+            sy2 = shot_y + random.randint(-14, 14)
+            pygame.draw.line(self.screen, (255, 180, 200), (sx1, sy1), (sx2, sy2), 2)
+
+        # 6. Target Collision / Boss Impact Flare
+        if (bsx - barrel_x) * facing_boss > 0 and abs(bsx - barrel_x) <= blast_reach:
+            flare_r = int(38 + 12 * math.sin(now_ticks * 0.1))
+            flare_surf = pygame.Surface((flare_r * 2, flare_r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(flare_surf, (255, 30, 50, 210), (flare_r, flare_r), flare_r)
+            pygame.draw.circle(flare_surf, (255, 240, 230, 255), (flare_r, flare_r), flare_r // 2)
+            self.screen.blit(flare_surf, (bsx - flare_r, shot_y - flare_r), special_flags=pygame.BLEND_ADD)
+            for _ in range(6):
+                spk_x = bsx + random.randint(-25, 25)
+                spk_y = shot_y + random.randint(-25, 25)
+                pygame.draw.circle(self.screen, (255, 200, 100), (spk_x, spk_y), random.randint(1, 3))
 
     def close(self):
         pygame.quit()
