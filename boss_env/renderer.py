@@ -213,147 +213,170 @@ class HeroKnightAnimator:
         return frame, (draw_x, draw_y)
 
 
-class PunkRebelAnimator:
-    """Manages sprite frame slicing and weapon overlay for The Rebel (Revolver)."""
-    def __init__(self, punk_dir: str = "assets/2 Punk", pistol_dir: str = "assets/PISTOL", scale: float = 2.4):
+class HunterAnimator:
+    """Manages sprite frame slicing and animation state for The Hunter (Revolver / Rifle weapon)."""
+    def __init__(self, asset_dir: str = "assets/hunter", scale: float = 2.6):
         self.scale = scale
-        self.frame_w = 48
-        self.frame_h = 48
-        self.scaled_w = int(self.frame_w * scale)
-        self.scaled_h = int(self.frame_h * scale)
-        self.center_x_offset = int(14 * scale)
-        self.feet_y_offset = int(47 * scale)
-
-        self.animations = {}
-        self.pistol_shoot = []
-        self.pistol_reload = []
-        self.pistol_idle = []
         self.loaded = False
-        self._load_sprites(punk_dir, pistol_dir)
+        self.idle_frames = []
+        self.run_frames = []
+        self.dodge_frames = []
+        self.rifle_sprite = None
+        self.crosshair_sprite = None
 
-    def _load_sprites(self, punk_dir: str, pistol_dir: str):
-        if not os.path.exists(punk_dir) or not os.path.exists(pistol_dir):
+        # Dimensions & offsets:
+        # In 32x32 frames (idle, dodge), character feet are at y=31, center x is ~15
+        self.feet_y_32 = int(31 * scale)
+        self.center_x_32 = int(15 * scale)
+
+        # In 38x35 frames (run), character feet are at y=34, center x is ~18
+        self.feet_y_35 = int(34 * scale)
+        self.center_x_38 = int(18 * scale)
+
+        self._load_sprites(asset_dir)
+
+    def _load_sprites(self, hdir: str):
+        if not os.path.exists(hdir):
             return
-        configs = [
-            ("idle", "Punk_idle.png", 4),
-            ("run", "Punk_run.png", 6),
-            ("jump", "Punk_jump.png", 4),
-            ("attack1", "Punk_attack1.png", 6),
-            ("attack2", "Punk_attack2.png", 8),
-            ("punch", "Punk_punch.png", 6),
-            ("hurt", "Punk_hurt.png", 2),
-            ("death", "Punk_death.png", 6),
-            ("roll", "Punk_doublejump.png", 6),
-        ]
         try:
-            for name, fname, count in configs:
-                fpath = os.path.join(punk_dir, fname)
-                if not os.path.exists(fpath):
-                    return
-                sheet = pygame.image.load(fpath).convert_alpha()
-                frames = []
-                for c in range(count):
-                    sub = sheet.subsurface((c * self.frame_w, 0, self.frame_w, self.frame_h))
-                    scaled = pygame.transform.scale(sub, (self.scaled_w, self.scaled_h))
-                    frames.append(scaled)
-                self.animations[name] = frames
+            # 1. Idle (4 frames of 32x32)
+            idle_path = os.path.join(hdir, "MC-Idle-SpriteSheet.png")
+            if os.path.exists(idle_path):
+                sheet = pygame.image.load(idle_path)
+                try:
+                    sheet = sheet.convert_alpha()
+                except Exception:
+                    pass
+                w32 = int(32 * self.scale)
+                for i in range(4):
+                    sub = sheet.subsurface((i * 32, 0, 32, 32))
+                    self.idle_frames.append(pygame.transform.scale(sub, (w32, w32)))
 
-            # Load Pistol GIF frame sequences
-            def load_gif_frames(path, p_scale=1.4):
-                im = Image.open(path)
-                frames = []
-                for i in range(im.n_frames):
-                    im.seek(i)
-                    rgba = im.convert("RGBA")
-                    raw_str = rgba.tobytes("raw", "RGBA")
-                    surf = pygame.image.fromstring(raw_str, rgba.size, "RGBA")
-                    if p_scale != 1.0:
-                        surf = pygame.transform.scale(surf, (int(rgba.size[0] * p_scale), int(rgba.size[1] * p_scale)))
-                    frames.append(surf)
-                return frames
+            # 2. Run with rifle (7 frames of 38x35)
+            run_path = os.path.join(hdir, "MC-Running(with Rifle)-SpriteSheet.png")
+            if os.path.exists(run_path):
+                sheet = pygame.image.load(run_path)
+                try:
+                    sheet = sheet.convert_alpha()
+                except Exception:
+                    pass
+                w38 = int(38 * self.scale)
+                h35 = int(35 * self.scale)
+                for i in range(7):
+                    sub = sheet.subsurface((i * 38, 0, 38, 35))
+                    self.run_frames.append(pygame.transform.scale(sub, (w38, h35)))
 
-            self.pistol_shoot = load_gif_frames(os.path.join(pistol_dir, "[shootingFX]PistolV1.01.gif"), p_scale=1.4)
-            self.pistol_reload = load_gif_frames(os.path.join(pistol_dir, "[animated] Pistol_V1.00_RELOAD.gif"), p_scale=1.4)
-            self.pistol_idle = load_gif_frames(os.path.join(pistol_dir, "[animated] PistolV1.00.gif"), p_scale=1.4)
-            self.loaded = True
+            # 3. Dodge (9 frames of 32x32)
+            dodge_path = os.path.join(hdir, "MC-Dodge-SpriteSheet.png")
+            if os.path.exists(dodge_path):
+                sheet = pygame.image.load(dodge_path)
+                try:
+                    sheet = sheet.convert_alpha()
+                except Exception:
+                    pass
+                w32 = int(32 * self.scale)
+                for i in range(9):
+                    sub = sheet.subsurface((i * 32, 0, 32, 32))
+                    self.dodge_frames.append(pygame.transform.scale(sub, (w32, w32)))
+
+            # 4. Rifle & Crosshair
+            rf_path = os.path.join(hdir, "Rifle.png")
+            if os.path.exists(rf_path):
+                rf_img = pygame.image.load(rf_path)
+                try:
+                    rf_img = rf_img.convert_alpha()
+                except Exception:
+                    pass
+                w32 = int(32 * self.scale)
+                self.rifle_sprite = pygame.transform.scale(rf_img, (w32, w32))
+
+            ch_path = os.path.join(hdir, "Crosshair.png")
+            if os.path.exists(ch_path):
+                ch_img = pygame.image.load(ch_path)
+                try:
+                    ch_img = ch_img.convert_alpha()
+                except Exception:
+                    pass
+                ch_size = int(24 * self.scale)
+                self.crosshair_sprite = pygame.transform.scale(ch_img, (ch_size, ch_size))
+
+            if self.idle_frames and self.run_frames and self.dodge_frames:
+                self.loaded = True
         except Exception as e:
-            print(f"[Renderer] Could not load 2 Punk or Pistol assets: {e}")
+            print(f"[Renderer] Could not load Hunter assets: {e}")
             self.loaded = False
 
-    def get_body_and_gun(self, player, facing_right: bool, is_moving: bool, tick: int, death_tick: int, psx: int, psy: int, is_shocked: bool = False):
+    def get_frame_and_rect(self, player, facing_right: bool, is_moving: bool, tick: int, death_tick: int, psx: int, psy: int, is_shocked: bool = False):
         if not self.loaded:
-            return None, (0, 0), None, (0, 0)
+            return None, (0, 0)
 
-        # 1. Body Animation
+        frame = None
+        center_x = self.center_x_32
+        feet_y = self.feet_y_32
+        scaled_w = int(32 * self.scale)
+        recoil_x = 0
+
+        # Animation states:
         if player.hearts <= 0:
-            frames = self.animations["death"]
-            idx = min(len(frames) - 1, death_tick // 4)
-            body_frame = frames[idx]
+            frame = self.dodge_frames[-1] if self.dodge_frames else self.idle_frames[0]
         elif is_shocked:
-            frames = self.animations.get("hurt", self.animations["idle"])
-            body_frame = frames[0]
-        elif player.airborne:
-            frames = self.animations["jump"]
-            idx = (tick // 6) % max(1, len(frames))
-            body_frame = frames[idx]
-        elif player.state == PlayerState.ATTACK:
-            frames = self.animations["punch"]
-            idx = (tick // 3) % max(1, len(frames))
-            body_frame = frames[idx]
+            frame = self.idle_frames[0]
         elif player.state == PlayerState.ROLL:
-            frames = self.animations.get("roll", self.animations["run"])
-            total_roll_frames = max(1, C.sec(C.ROLL_DURATION_S))
-            progress = max(0.0, min(1.0, 1.0 - (player.action_timer / total_roll_frames)))
+            frames = self.dodge_frames
+            total_roll = max(1, C.sec(C.ROLL_DURATION_S))
+            progress = max(0.0, min(1.0, 1.0 - (player.action_timer / total_roll)))
             idx = min(len(frames) - 1, int(progress * len(frames)))
-            body_frame = frames[idx]
-        elif player.state == PlayerState.PARRY:
-            frames = self.animations["idle"]
-            body_frame = frames[min(len(frames) - 1, 2)]
+            frame = frames[idx]
+        elif player.airborne:
+            frame = self.run_frames[2] if len(self.run_frames) > 2 else self.idle_frames[0]
+            center_x = self.center_x_38
+            feet_y = self.feet_y_35
+            scaled_w = int(38 * self.scale)
+        elif player.state == PlayerState.ATTACK:
+            # Firing stance with subtle recoil kick
+            frame = self.idle_frames[3] if len(self.idle_frames) > 3 else self.idle_frames[0]
+            recoil_x = -4 if facing_right else 4
         elif is_moving:
-            frames = self.animations["run"]
-            idx = (tick // 5) % max(1, len(frames))
-            body_frame = frames[idx]
+            idx = (tick // 5) % len(self.run_frames)
+            frame = self.run_frames[idx]
+            center_x = self.center_x_38
+            feet_y = self.feet_y_35
+            scaled_w = int(38 * self.scale)
         else:
-            frames = self.animations["idle"]
-            idx = (tick // 6) % max(1, len(frames))
-            body_frame = frames[idx]
+            idx = (tick // 8) % len(self.idle_frames)
+            frame = self.idle_frames[idx]
 
-        # 2. Revolver Overlay Animation
-        gun_frame = None
-        gun_ox, gun_oy = 0, 0
-        if player.hearts > 0:
-            if player.state == PlayerState.ROLL:
-                gun_frame = None  # Holster gun during athletic acrobatic roll
-            elif player.state == PlayerState.ATTACK:
-                frames = self.pistol_shoot
-                idx = (tick // 2) % max(1, len(frames))
-                gun_frame = frames[idx]
-                gun_ox = -4 if facing_right else 4  # Recoil kickback
-            elif player.reload_timer > 0:
-                frames = self.pistol_reload
-                rel_frac = 1.0 - (player.reload_timer / max(1, C.sec(C.REVOLVER_RELOAD_S)))
-                idx = min(len(frames) - 1, int(rel_frac * len(frames)))
-                gun_frame = frames[idx]
-                gun_oy = 4  # Barrel tilted downward
-            else:
-                gun_frame = self.pistol_idle[0]
-
-        # Flipping and placement
+        # Flipping: Hunter natively faces RIGHT
         if not facing_right:
-            body_frame = pygame.transform.flip(body_frame, True, False)
-            body_x = psx - (self.scaled_w - self.center_x_offset)
-            if gun_frame:
-                gun_frame = pygame.transform.flip(gun_frame, True, False)
-                gun_x = psx - 52 + gun_ox
-                gun_y = psy - 55 + gun_oy
+            frame = pygame.transform.flip(frame, True, False)
+            draw_x = psx - (scaled_w - center_x) + recoil_x
         else:
-            body_x = psx - self.center_x_offset
-            if gun_frame:
-                gun_x = psx + 2 + gun_ox
-                gun_y = psy - 55 + gun_oy
+            draw_x = psx - center_x + recoil_x
 
-        body_y = psy - self.feet_y_offset
-        return body_frame, (body_x, body_y), gun_frame, (gun_x if gun_frame else 0, gun_y if gun_frame else 0)
+        draw_y = psy - feet_y
+        return frame, (draw_x, draw_y)
+
+    def draw_muzzle_flash(self, screen, draw_x: int, draw_y: int, facing_right: bool):
+        scaled_w = int(32 * self.scale)
+        if facing_right:
+            bx = draw_x + int(28 * self.scale)
+        else:
+            bx = draw_x + (scaled_w - int(28 * self.scale))
+        by = draw_y + int(17 * self.scale)
+
+        flash_surf = pygame.Surface((36, 36), pygame.SRCALPHA)
+        pygame.draw.circle(flash_surf, (255, 230, 140, 240), (18, 18), 7)
+        pygame.draw.circle(flash_surf, (255, 255, 255, 255), (18, 18), 3)
+        dir_mult = 1 if facing_right else -1
+        for angle in [-0.4, -0.2, 0.0, 0.2, 0.4]:
+            sx2 = 18 + int(math.cos(angle) * dir_mult * 14)
+            sy2 = 18 + int(math.sin(angle) * 14)
+            pygame.draw.line(flash_surf, (255, 190, 70, 220), (18, 18), (sx2, sy2), 2)
+        screen.blit(flash_surf, (bx - 18, by - 18), special_flags=pygame.BLEND_ADD)
+
+
+# Backwards compatibility alias
+PunkRebelAnimator = HunterAnimator
 
 
 class ColdCorridorsBackground:
@@ -533,7 +556,8 @@ class Renderer:
         # Sprite animators & Gothic Background
         self.boss_animator = NightBorneBossAnimator()
         self.hero_animator = HeroKnightAnimator()
-        self.rebel_animator = PunkRebelAnimator()
+        self.hunter_animator = HunterAnimator()
+        self.rebel_animator = self.hunter_animator
         self.corridor_bg = ColdCorridorsBackground(width=self.width, height=self.height, ground_y=self.ground_y)
         self.anim_tick = 0
         self.boss_death_timer = 0
@@ -820,8 +844,8 @@ class Renderer:
                 self.screen.blit(frame, (draw_x, draw_y))
                 rendered_sprite = True
 
-        elif env.weapon.name == "revolver" and self.rebel_animator.loaded:
-            body_frame, (bx, by), gun_frame, (gx, gy) = self.rebel_animator.get_body_and_gun(
+        elif env.weapon.name == "revolver" and getattr(self, "hunter_animator", None) and self.hunter_animator.loaded:
+            frame, (draw_x, draw_y) = self.hunter_animator.get_frame_and_rect(
                 player=p,
                 facing_right=facing_right,
                 is_moving=is_moving,
@@ -831,10 +855,11 @@ class Renderer:
                 psy=psy,
                 is_shocked=is_shocked,
             )
-            if body_frame is not None:
-                self.screen.blit(body_frame, (bx, by))
-                if gun_frame is not None:
-                    self.screen.blit(gun_frame, (gx, gy))
+            if frame is not None:
+                self.screen.blit(frame, (draw_x, draw_y))
+                # Dynamic muzzle flash when firing
+                if p.state == PlayerState.ATTACK:
+                    self.hunter_animator.draw_muzzle_flash(self.screen, draw_x, draw_y, facing_right)
                 rendered_sprite = True
 
         if not rendered_sprite:
