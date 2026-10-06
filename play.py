@@ -40,8 +40,14 @@ def get_action_from_keys(keys, env: BossFightEnv) -> Action:
     if (keys[pygame.K_u] or keys[pygame.K_f]) and mask[Action.PARRY]:
         return Action.PARRY
 
-    # 4. Roll
+    # 4. Roll (hold A/Left to roll left, D/Right to roll right, neutral rolls away from boss)
     if (keys[pygame.K_l] or keys[pygame.K_c] or keys[pygame.K_LSHIFT]) and mask[Action.DODGE_ROLL]:
+        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+            env.player.requested_roll_dir = 1.0
+        elif keys[pygame.K_a] or keys[pygame.K_LEFT]:
+            env.player.requested_roll_dir = -1.0
+        else:
+            env.player.requested_roll_dir = 0.0
         return Action.DODGE_ROLL
 
     # 5. Attacks

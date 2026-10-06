@@ -80,6 +80,8 @@ class Player:
     recovery_timer: int = 0      # post-attack locked frames (cannot act)
     pending_attack_id: int = 0   # 1=light, 2=heavy (set at windup start, cleared after damage)
     roll_dir: float = 1.0        # +1.0 or -1.0, set when roll starts
+    requested_roll_dir: float = 0.0  # directional override (e.g. -1.0 left, +1.0 right, 0.0 unset)
+    last_move_dir: float = 0.0   # last movement direction (-1.0, +1.0, 0.0)
 
     # --- airborne ---
     airborne: bool = False

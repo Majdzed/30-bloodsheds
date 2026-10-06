@@ -405,11 +405,18 @@ class BossFightEnv(gym.Env):
                         p.state               = PlayerState.ROLL
                         p.action_timer        = C.sec(C.ROLL_DURATION_S)
                         p.iframes             = C.sec(C.ROLL_IFRAMES_S)
-                        # Roll away from the boss; if at wall, roll toward it
-                        if b.x > p.x:
-                            p.roll_dir = -1.0 if p.x > 0 else 1.0
+                        # Determine roll direction (supports forward and backward roll):
+                        if getattr(p, "requested_roll_dir", 0.0) != 0.0:
+                            p.roll_dir = 1.0 if p.requested_roll_dir > 0 else -1.0
+                            p.requested_roll_dir = 0.0
+                        elif getattr(p, "last_move_dir", 0.0) != 0.0:
+                            p.roll_dir = 1.0 if p.last_move_dir > 0 else -1.0
                         else:
-                            p.roll_dir =  1.0 if p.x < C.ARENA_W else -1.0
+                            # Neutral roll: away from the boss; if at wall, roll toward it
+                            if b.x > p.x:
+                                p.roll_dir = -1.0 if p.x > 0 else 1.0
+                            else:
+                                p.roll_dir =  1.0 if p.x < C.ARENA_W else -1.0
                 elif action == Action.PARRY:
                     if p.parry_cd == 0:
                         p.state        = PlayerState.PARRY
@@ -441,8 +448,12 @@ class BossFightEnv(gym.Env):
         if p.state not in (PlayerState.ROLL, PlayerState.PARRY, PlayerState.SUPER, PlayerState.DRINK):
             if action == Action.MOVE_LEFT:
                 p.x -= C.PLAYER_SPEED * dt
+                p.last_move_dir = -1.0
             elif action == Action.MOVE_RIGHT:
                 p.x += C.PLAYER_SPEED * dt
+                p.last_move_dir = 1.0
+            elif action == Action.IDLE:
+                p.last_move_dir = 0.0
         p.x = float(np.clip(p.x, 0.0, C.ARENA_W))
 
         dist = abs(b.x - p.x)

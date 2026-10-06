@@ -176,7 +176,8 @@ class HeroKnightAnimator:
             frame = frames[idx]
         elif player.state == PlayerState.ROLL:
             frames = self.animations["run"]
-            idx = (tick // 3) % max(1, len(frames))
+            # Rapid athletic quick-steps footwork
+            idx = (tick // 2) % max(1, len(frames))
             frame = frames[idx]
         elif player.state == PlayerState.PARRY:
             frames = self.animations["attack1"]
@@ -204,6 +205,8 @@ class HeroKnightAnimator:
             draw_x = psx - self.center_x_offset
 
         draw_y = psy - self.feet_y_offset
+        if player.state == PlayerState.ROLL:
+            draw_y += 3  # Lower crouched quick-step profile
         return frame, (draw_x, draw_y)
 
 
@@ -237,6 +240,7 @@ class PunkRebelAnimator:
             ("punch", "Punk_punch.png", 6),
             ("hurt", "Punk_hurt.png", 2),
             ("death", "Punk_death.png", 6),
+            ("roll", "Punk_doublejump.png", 6),
         ]
         try:
             for name, fname, count in configs:
@@ -291,8 +295,10 @@ class PunkRebelAnimator:
             idx = (tick // 3) % max(1, len(frames))
             body_frame = frames[idx]
         elif player.state == PlayerState.ROLL:
-            frames = self.animations["run"]
-            idx = (tick // 3) % max(1, len(frames))
+            frames = self.animations.get("roll", self.animations["run"])
+            total_roll_frames = max(1, C.sec(C.ROLL_DURATION_S))
+            progress = max(0.0, min(1.0, 1.0 - (player.action_timer / total_roll_frames)))
+            idx = min(len(frames) - 1, int(progress * len(frames)))
             body_frame = frames[idx]
         elif player.state == PlayerState.PARRY:
             frames = self.animations["idle"]
@@ -310,7 +316,9 @@ class PunkRebelAnimator:
         gun_frame = None
         gun_ox, gun_oy = 0, 0
         if player.hearts > 0:
-            if player.state == PlayerState.ATTACK:
+            if player.state == PlayerState.ROLL:
+                gun_frame = None  # Holster gun during athletic acrobatic roll
+            elif player.state == PlayerState.ATTACK:
                 frames = self.pistol_shoot
                 idx = (tick // 2) % max(1, len(frames))
                 gun_frame = frames[idx]
@@ -597,14 +605,11 @@ class Renderer:
         self._prev_player_x = p.x
 
         facing_boss = 1 if b.x > p.x else -1
-        facing_right = facing_boss > 0
+        facing_right = (p.roll_dir > 0) if p.state == PlayerState.ROLL else (facing_boss > 0)
 
-        # Invulnerability aura
-        if p.iframes > 0:
-            glow_surf = pygame.Surface((pw + 24, ph + 24), pygame.SRCALPHA)
-            glow_color = (255, 60, 80, 140) if p.state == PlayerState.SUPER else (130, 220, 255, 120)
-            pygame.draw.rect(glow_surf, glow_color, (0, 0, pw + 24, ph + 24), border_radius=12)
-            self.screen.blit(glow_surf, (psx - pw // 2 - 12, psy - ph - 12))
+        # Roll dash effects (dust puffs, ghost afterimages, slipstream streaks)
+        if p.state == PlayerState.ROLL:
+            self._draw_roll_effects(p, psx, psy, pw, ph, now_ticks)
 
         # Check which character animator to use
         rendered_sprite = False
@@ -1072,6 +1077,39 @@ class Renderer:
                 b_size = random.randint(2, 4)
                 pygame.draw.circle(self.screen, (255, 30, 60), (bx, by), b_size)
                 pygame.draw.line(self.screen, (180, 15, 35), (bx, by), (bx - facing_boss * random.randint(5, 15), by + random.randint(2, 8)), 1)
+
+    def _draw_roll_effects(self, p, psx: int, psy: int, pw: int, ph: int, now_ticks: int):
+        """Procedural quick-step and roll VFX: ghost afterimages, ground dust puffs, slipstream streaks."""
+        total_roll_frames = max(1, C.sec(C.ROLL_DURATION_S))
+        progress = max(0.0, min(1.0, 1.0 - (p.action_timer / total_roll_frames)))
+        roll_dir = getattr(p, "roll_dir", 1.0)
+        facing_mult = 1 if roll_dir > 0 else -1
+
+        # 1. Motion blur ghost afterimages trailing behind the roll
+        for i in (1, 2, 3):
+            dist_back = int(facing_mult * 16 * i * (0.8 + 0.4 * progress))
+            gx = psx - dist_back
+            alpha = int(85 / (i * 1.2))
+            ghost_surf = pygame.Surface((pw + 10, ph + 4), pygame.SRCALPHA)
+            pygame.draw.ellipse(ghost_surf, (140, 215, 255, alpha), (0, 0, pw + 10, ph + 4))
+            self.screen.blit(ghost_surf, (gx - pw // 2 - 5, psy - ph - 2))
+
+        # 2. Ground friction dust puffs kicking up behind feet
+        for _ in range(3):
+            d_ox = -facing_mult * random.randint(8, 38)
+            d_oy = -random.randint(2, 9)
+            d_r = random.randint(3, 6)
+            dust_surf = pygame.Surface((d_r * 2, d_r * 2), pygame.SRCALPHA)
+            dust_alpha = random.randint(90, 150)
+            pygame.draw.circle(dust_surf, (190, 200, 215, dust_alpha), (d_r, d_r), d_r)
+            self.screen.blit(dust_surf, (psx + d_ox - d_r, psy + d_oy - d_r))
+
+        # 3. Horizontal slipstream speed streaks
+        for off_y in (18, 36, 54):
+            streak_len = random.randint(35, 60)
+            s_start = (psx, psy - off_y)
+            s_end = (psx - facing_mult * streak_len, psy - off_y)
+            pygame.draw.line(self.screen, (220, 245, 255), s_start, s_end, 2)
 
     def close(self):
         pygame.quit()
