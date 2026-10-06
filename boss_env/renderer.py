@@ -6,6 +6,7 @@ Only reads env state; never modifies it.
 
 import os
 import math
+import random
 import pygame
 from . import constants as C
 from .abilities import ABILITIES
@@ -77,18 +78,18 @@ class NightBorneBossAnimator:
             frames = self.animations["attack"]
             # Attack frames 0..6 represent the sword raising windup
             wt = max(1, windup_total)
-            progress = 1.0 - (boss.action_timer / wt)
-            idx = min(6, int(progress * 7))
-            frame = frames[idx]
+            progress = max(0.0, min(1.0, 1.0 - (boss.action_timer / wt)))
+            idx = max(0, min(6, int(progress * 7)))
+            frame = frames[min(len(frames) - 1, idx)]
         elif boss.state == BossState.ATTACK:
             frames = self.animations["attack"]
             # Attack frames 7..11 are the slash and recovery follow-through
             idx = 7 + min(4, (tick // 3) % 5)
-            frame = frames[idx]
+            frame = frames[min(len(frames) - 1, max(0, idx))]
         elif boss.state == BossState.HEAL:
             # Siphon Heal: casting posture with raised blade
             frames = self.animations["attack"]
-            frame = frames[4]
+            frame = frames[min(len(frames) - 1, 4)]
         else:
             # Idle vs Movement
             dist_to_player = abs(player_x - boss.x)
@@ -223,12 +224,16 @@ class Renderer:
             color = (255, 50, 50, 70) if b.current_ability_id in (1, 7) else (180, 50, 255, 70)
             pygame.draw.circle(aura_surf, color, (aura_radius, aura_radius), aura_radius)
             self.screen.blit(aura_surf, (bsx - aura_radius, bsy - bh // 2 - aura_radius))
-            # Melee warning arc
-            if b.current_ability_id in (1, 7):
+            # Melee warning arc for Ability 7 (Dual-Blade Frenzy)
+            if b.current_ability_id == 7:
                 arc_w = int(120 * self.scale)
                 arc_dir = 1 if p.x > b.x else -1
                 arc_rect = pygame.Rect(bsx if arc_dir > 0 else bsx - arc_w, bsy - 15, arc_w, 15)
                 pygame.draw.rect(self.screen, (255, 60, 60, 110), arc_rect, border_radius=4)
+
+        # Ability 1 Lightning Strike Procedural VFX
+        if b.current_ability_id == 1 and b.state in (BossState.WINDUP, BossState.ATTACK):
+            self._draw_lightning_strike(env, b, p, bsx, bsy, now_ticks)
 
         if self.boss_animator.loaded:
             windup_total = getattr(env, "_boss_windup_total", 30)
@@ -525,6 +530,113 @@ class Renderer:
         ctrl_text = f"[{wpn_name}] A/D: Move | W/Space: Jump | J: Light | K: Heavy | L: Roll | U: Parry | I: {super_name} | F: Flask"
         txt_ctrl = self.font_small.render(ctrl_text, True, (140, 150, 175))
         self.screen.blit(txt_ctrl, ((self.width - txt_ctrl.get_width()) // 2, self.height - 30))
+
+    def _draw_lightning_strike(self, env, b, p, bsx: int, bsy: int, now_ticks: int):
+        """Procedural VFX for Boss Ability 1: Lightning Strike."""
+        facing = 1 if p.x > b.x else -1
+        windup_total = getattr(env, "_boss_windup_total", 30)
+        sword_x = bsx + facing * 25
+        sword_y = bsy - 140
+        strike_reach = int(120 * self.scale)
+        strike_impact_x = bsx + facing * int(65 * self.scale)
+
+        # -------------------------------------------------------------
+        # 1. Windup Phase: Charging sparks and ground targeting
+        # -------------------------------------------------------------
+        if b.state == BossState.WINDUP and b.current_ability_id == 1:
+            progress = max(0.0, min(1.0, 1.0 - (b.action_timer / max(1, windup_total))))
+
+            # Sparks crackling on NightBorne's raised sword
+            num_sparks = int(3 + progress * 5)
+            for _ in range(num_sparks):
+                ox1 = random.randint(-18, 18)
+                oy1 = random.randint(-25, 25)
+                ox2 = ox1 + random.randint(-12, 12)
+                oy2 = oy1 + random.randint(-12, 12)
+                pygame.draw.line(self.screen, (200, 245, 255), (sword_x + ox1, sword_y + oy1), (sword_x + ox2, sword_y + oy2), 2)
+                pygame.draw.circle(self.screen, (100, 220, 255), (sword_x + ox1, sword_y + oy1), 2)
+
+            # Ground electric charging zone
+            warn_w = strike_reach
+            warn_x = bsx if facing > 0 else bsx - warn_w
+            warn_surf = pygame.Surface((warn_w, 20), pygame.SRCALPHA)
+            alpha = int(80 + 100 * progress + 40 * math.sin(now_ticks * 0.05))
+            pygame.draw.rect(warn_surf, (80, 200, 255, alpha), (0, 0, warn_w, 20), border_radius=4)
+            # Ground crawling spark arcs
+            for _ in range(int(2 + progress * 4)):
+                gx1 = random.randint(5, warn_w - 5)
+                gx2 = gx1 + random.randint(-15, 15)
+                pygame.draw.line(warn_surf, (255, 255, 255, min(255, alpha + 50)), (gx1, 10), (gx2, 10 + random.randint(-4, 4)), 2)
+            self.screen.blit(warn_surf, (warn_x, bsy - 18))
+
+            # Faint descending electric streamer from the sky as strike nears
+            if progress > 0.4:
+                sky_pts = [(strike_impact_x + random.randint(-8, 8), y) for y in range(0, bsy, 60)]
+                sky_pts.append((strike_impact_x, bsy))
+                for i in range(len(sky_pts) - 1):
+                    col = (140, 220, 255)
+                    pygame.draw.line(self.screen, col, sky_pts[i], sky_pts[i + 1], 1)
+
+        # -------------------------------------------------------------
+        # 2. Attack Phase: Violent Thunder Impact
+        # -------------------------------------------------------------
+        elif b.state == BossState.ATTACK and b.current_ability_id == 1:
+            # Fullscreen flash on initial impact
+            flash_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            flash_alpha = 45 if (b.action_timer > 5) else 20
+            flash_surf.fill((160, 230, 255, flash_alpha))
+            self.screen.blit(flash_surf, (0, 0))
+
+            # Helper to generate jagged segment points
+            def make_bolt(x1, y1, x2, y2, segments=9, jitter=22):
+                pts = [(x1, y1)]
+                dx = (x2 - x1) / segments
+                dy = (y2 - y1) / segments
+                for si in range(1, segments):
+                    px = x1 + dx * si + random.randint(-jitter, jitter)
+                    py = y1 + dy * si + random.randint(-int(jitter * 0.3), int(jitter * 0.3))
+                    pts.append((px, py))
+                pts.append((x2, y2))
+                return pts
+
+            # Primary Sky-to-Ground Thunder Bolt
+            sky_start_x = strike_impact_x + random.randint(-20, 20)
+            main_bolt = make_bolt(sky_start_x, 0, strike_impact_x, bsy, segments=10, jitter=24)
+
+            # Secondary fork from sword into impact
+            sword_bolt = make_bolt(sword_x, sword_y, strike_impact_x, bsy - 30, segments=5, jitter=14)
+
+            # Minor side branch
+            branch_pt = main_bolt[len(main_bolt) // 2]
+            branch_bolt = make_bolt(branch_pt[0], branch_pt[1], branch_pt[0] + facing * random.randint(30, 70), branch_pt[1] + random.randint(40, 90), segments=4, jitter=12)
+
+            all_bolts = [
+                (main_bolt, 8, 4, 2),
+                (sword_bolt, 5, 3, 1),
+                (branch_bolt, 4, 2, 1),
+            ]
+
+            # Draw glow, inner, and core lines
+            for pts, glow_w, inner_w, core_w in all_bolts:
+                for i in range(len(pts) - 1):
+                    pygame.draw.line(self.screen, (50, 150, 255), pts[i], pts[i + 1], glow_w)
+                for i in range(len(pts) - 1):
+                    pygame.draw.line(self.screen, (160, 235, 255), pts[i], pts[i + 1], inner_w)
+                for i in range(len(pts) - 1):
+                    pygame.draw.line(self.screen, (255, 255, 255), pts[i], pts[i + 1], core_w)
+
+            # Ground blast impact shockwave & sparks
+            blast_w = int(90 * self.scale)
+            blast_surf = pygame.Surface((blast_w * 2, 40), pygame.SRCALPHA)
+            pygame.draw.ellipse(blast_surf, (100, 220, 255, 180), (0, 0, blast_w * 2, 40))
+            pygame.draw.ellipse(blast_surf, (255, 255, 255, 240), (blast_w // 2, 8, blast_w, 24))
+            self.screen.blit(blast_surf, (strike_impact_x - blast_w, bsy - 20))
+
+            # Ground sparks scattering
+            for _ in range(10):
+                spk_x = strike_impact_x + random.randint(-int(strike_reach * 0.6), int(strike_reach * 0.6))
+                spk_y = bsy - random.randint(2, 25)
+                pygame.draw.circle(self.screen, (255, 255, 255), (spk_x, spk_y), random.randint(1, 3))
 
     def close(self):
         pygame.quit()
