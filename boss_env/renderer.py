@@ -910,37 +910,139 @@ class Renderer:
         p = env.player
         b = env.boss
 
-        # --- Boss HP Bar (Top Center) ---
-        bar_w, bar_h = 520, 24
+        # --- Boss HP Bar (Top Center: Sleek Horizontal Minimalist Bar with Thorny Plant Vines) ---
+        bar_w, bar_h = 420, 10
         bar_x = (self.width - bar_w) // 2
-        bar_y = 35
+        bar_y = 44
+        cy = bar_y + bar_h // 2
+        amp = bar_h // 2 + 5
+        wavelength = 48.0
 
-        boss_title = f"VON VASTORIOUS (Fight {env.fight}/30)"
-        txt_boss = self.font_main.render(boss_title, True, (240, 220, 230))
-        self.screen.blit(txt_boss, (bar_x, bar_y - 24))
+        # Boss Title & Fight counter
+        boss_title = f"VON VASTORIOUS   •   FIGHT {env.fight}/30"
+        txt_boss = self.font_hud.render(boss_title, True, (230, 215, 225))
+        self.screen.blit(txt_boss, (bar_x, bar_y - 22))
 
-        # Dynamic ability telegraph banner
+        # Dynamic ability / status telegraph
         if b.state == BossState.WINDUP:
             ab_name = ABILITIES[b.current_ability_id - 1].name.upper() if 1 <= b.current_ability_id <= len(ABILITIES) else "ATTACK"
-            txt_warn = self.font_main.render(f"! {ab_name} !", True, (255, 70, 70))
-            self.screen.blit(txt_warn, (bar_x + bar_w - txt_warn.get_width(), bar_y - 24))
+            txt_warn = self.font_hud.render(f"! {ab_name} !", True, (255, 60, 60))
+            self.screen.blit(txt_warn, (bar_x + bar_w - txt_warn.get_width(), bar_y - 22))
         elif b.state == BossState.HEAL:
-            txt_heal = self.font_main.render("! SIPHON HEAL !", True, (80, 255, 140))
-            self.screen.blit(txt_heal, (bar_x + bar_w - txt_heal.get_width(), bar_y - 24))
+            txt_heal = self.font_hud.render("! SIPHON HEAL !", True, (80, 255, 140))
+            self.screen.blit(txt_heal, (bar_x + bar_w - txt_heal.get_width(), bar_y - 22))
         elif b.state == BossState.STUN:
-            txt_stun = self.font_main.render("STUNNED!", True, (255, 220, 80))
-            self.screen.blit(txt_stun, (bar_x + bar_w - txt_stun.get_width(), bar_y - 24))
+            txt_stun = self.font_hud.render("★ STUNNED ★", True, (255, 220, 80))
+            self.screen.blit(txt_stun, (bar_x + bar_w - txt_stun.get_width(), bar_y - 22))
+        else:
+            txt_hp = self.font_small.render(f"{int(b.hp)} / {int(b.max_hp)}", True, (180, 185, 200))
+            self.screen.blit(txt_hp, (bar_x + bar_w - txt_hp.get_width(), bar_y - 20))
 
-        # Boss HP bar
-        pygame.draw.rect(self.screen, (30, 20, 25), (bar_x - 2, bar_y - 2, bar_w + 4, bar_h + 4), border_radius=4)
+        # -------------------------------------------------------------
+        # Thorny Plant Vine Coiling (Helical 3D wrap around the bar)
+        # -------------------------------------------------------------
+        c_vine_dark = (22, 38, 22)
+        c_vine_mid = (45, 80, 42)
+        c_vine_hi = (70, 125, 60)
+        c_thorn = (165, 55, 55)
+        c_thorn_tip = (235, 120, 100)
+        c_leaf = (55, 145, 65)
+
+        # Generate helical segments
+        steps = int((bar_w + 30) * 1.5)
+        back_segments = []
+        front_segments = []
+        cur_back = []
+        cur_front = []
+
+        for i in range(steps + 1):
+            px = (bar_x - 14) + (i / steps) * (bar_w + 28)
+            theta = 2 * math.pi * (px - bar_x) / wavelength
+            pz = math.cos(theta)
+            py = cy - amp * math.sin(theta)
+
+            if pz < 0:
+                if cur_front:
+                    front_segments.append(cur_front)
+                    cur_front = []
+                cur_back.append((px, py, theta))
+            else:
+                if cur_back:
+                    back_segments.append(cur_back)
+                    cur_back = []
+                cur_front.append((px, py, theta))
+
+        if cur_back:
+            back_segments.append(cur_back)
+        if cur_front:
+            front_segments.append(cur_front)
+
+        # 1. Back vine strands (wound behind the health bar)
+        for seg in back_segments:
+            if len(seg) > 1:
+                pts = [(p[0], p[1]) for p in seg]
+                pygame.draw.lines(self.screen, c_vine_dark, False, pts, 4)
+                pygame.draw.lines(self.screen, c_vine_mid, False, pts, 2)
+
+        # 2. Sleek Minimalist Health Bar
+        # Obsidian border / backing frame
+        pygame.draw.rect(self.screen, (14, 10, 18), (bar_x - 2, bar_y - 2, bar_w + 4, bar_h + 4), border_radius=3)
+        # Empty dark trough
+        pygame.draw.rect(self.screen, (32, 18, 24), (bar_x, bar_y, bar_w, bar_h), border_radius=2)
+
+        # Red Health Fill
         hp_frac = max(0.0, b.hp / b.max_hp)
         fill_w = int(bar_w * hp_frac)
         if fill_w > 0:
-            pygame.draw.rect(self.screen, (190, 30, 50), (bar_x, bar_y, fill_w, bar_h), border_radius=3)
-        pygame.draw.rect(self.screen, (120, 70, 80), (bar_x, bar_y, bar_w, bar_h), 2, border_radius=3)
+            # Ruby health fill
+            pygame.draw.rect(self.screen, (190, 25, 45), (bar_x, bar_y, fill_w, bar_h), border_radius=2)
+            # Upper sleek highlight line
+            pygame.draw.line(self.screen, (240, 80, 100), (bar_x, bar_y), (bar_x + fill_w, bar_y), 1)
 
-        txt_hp = self.font_hud.render(f"{int(b.hp)} / {int(b.max_hp)}", True, (255, 255, 255))
-        self.screen.blit(txt_hp, (bar_x + (bar_w - txt_hp.get_width()) // 2, bar_y + 4))
+        # Subtle border line
+        pygame.draw.rect(self.screen, (85, 40, 50), (bar_x, bar_y, bar_w, bar_h), width=1, border_radius=2)
+
+        # 3. Front vine strands (wound across the front of the health bar)
+        for seg in front_segments:
+            if len(seg) > 1:
+                pts = [(p[0], p[1]) for p in seg]
+                pygame.draw.lines(self.screen, c_vine_dark, False, pts, 4)
+                pygame.draw.lines(self.screen, c_vine_mid, False, pts, 3)
+                pygame.draw.lines(self.screen, c_vine_hi, False, pts, 1)
+
+        # 4. Spikes / Thorns and Leaflets along the plant vine
+        all_pts = []
+        for seg in front_segments + back_segments:
+            all_pts.extend(seg)
+        all_pts.sort(key=lambda p: p[0])
+
+        for i in range(2, len(all_pts) - 2, 10):
+            px, py, theta = all_pts[i]
+            st = math.sin(theta)
+            # Top crest thorns (pointing upward)
+            if st > 0.65:
+                tip_x = px + 3
+                tip_y = py - 7
+                pygame.draw.polygon(self.screen, c_thorn, [(px - 2, py), (px + 2, py), (tip_x, tip_y)])
+                pygame.draw.circle(self.screen, c_thorn_tip, (int(tip_x), int(tip_y)), 1)
+                # Small leaf sprouting near thorn
+                pygame.draw.polygon(self.screen, c_leaf, [(px - 3, py), (px - 6, py - 4), (px - 1, py - 2)])
+            # Bottom crest thorns (pointing downward)
+            elif st < -0.65:
+                tip_x = px - 3
+                tip_y = py + 7
+                pygame.draw.polygon(self.screen, c_thorn, [(px - 2, py), (px + 2, py), (tip_x, tip_y)])
+                pygame.draw.circle(self.screen, c_thorn_tip, (int(tip_x), int(tip_y)), 1)
+                # Small leaf sprouting near thorn
+                pygame.draw.polygon(self.screen, c_leaf, [(px + 3, py), (px + 6, py + 4), (px + 1, py + 2)])
+
+        # 5. Bramble coil caps on left and right ends
+        # Left curly coil with thorns
+        pygame.draw.arc(self.screen, c_vine_mid, pygame.Rect(bar_x - 16, bar_y - 6, 18, bar_h + 12), 0.5, 5.2, 3)
+        pygame.draw.polygon(self.screen, c_thorn, [(bar_x - 12, bar_y + 1), (bar_x - 10, bar_y + 4), (bar_x - 18, bar_y - 3)])
+        # Right curly coil with thorns
+        pygame.draw.arc(self.screen, c_vine_mid, pygame.Rect(bar_x + bar_w - 2, bar_y - 6, 18, bar_h + 12), 3.4, 8.2, 3)
+        pygame.draw.polygon(self.screen, c_thorn, [(bar_x + bar_w + 10, bar_y + 1), (bar_x + bar_w + 8, bar_y + 4), (bar_x + bar_w + 17, bar_y - 3)])
 
         # --- Player HUD (Top Left) ---
         hud_x, hud_y = 40, 35
