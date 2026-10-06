@@ -8,6 +8,7 @@ import os
 import math
 import random
 import pygame
+from PIL import Image
 from . import constants as C
 from .abilities import ABILITIES
 from .entities import PlayerState, BossState
@@ -112,6 +113,235 @@ class NightBorneBossAnimator:
         return frame, (draw_x, draw_y)
 
 
+class HeroKnightAnimator:
+    """Manages sprite frame slicing and animation state for the Hero Knight (Katana)."""
+    def __init__(self, sprite_dir: str = "assets/Hero Knight/Sprites", scale: float = 1.75):
+        self.scale = scale
+        self.frame_w = 180
+        self.frame_h = 180
+        self.scaled_w = int(self.frame_w * scale)
+        self.scaled_h = int(self.frame_h * scale)
+        self.center_x_offset = int(90 * scale)
+        self.feet_y_offset = int(113 * scale)
+
+        self.animations = {}
+        self.loaded = False
+        self._load_sprites(sprite_dir)
+
+    def _load_sprites(self, sdir: str):
+        if not os.path.exists(sdir):
+            return
+        configs = [
+            ("idle", "Idle.png", 11),
+            ("run", "Run.png", 8),
+            ("jump", "Jump.png", 3),
+            ("fall", "Fall.png", 3),
+            ("attack1", "Attack1.png", 7),
+            ("attack2", "Attack2.png", 7),
+            ("hurt", "Take Hit.png", 4),
+            ("death", "Death.png", 11),
+        ]
+        try:
+            for name, fname, count in configs:
+                fpath = os.path.join(sdir, fname)
+                if not os.path.exists(fpath):
+                    return
+                sheet = pygame.image.load(fpath).convert_alpha()
+                frames = []
+                for c in range(count):
+                    sub = sheet.subsurface((c * self.frame_w, 0, self.frame_w, self.frame_h))
+                    scaled = pygame.transform.scale(sub, (self.scaled_w, self.scaled_h))
+                    frames.append(scaled)
+                self.animations[name] = frames
+            self.loaded = True
+        except Exception as e:
+            print(f"[Renderer] Could not load Hero Knight sprites: {e}")
+            self.loaded = False
+
+    def get_frame_and_rect(self, player, facing_right: bool, is_moving: bool, tick: int, death_tick: int, psx: int, psy: int):
+        if not self.loaded:
+            return None, (0, 0)
+
+        if player.hearts <= 0:
+            frames = self.animations["death"]
+            idx = min(len(frames) - 1, death_tick // 4)
+            frame = frames[idx]
+        elif player.airborne:
+            frames = self.animations["jump"] if player.vy > 0 else self.animations["fall"]
+            idx = (tick // 6) % max(1, len(frames))
+            frame = frames[idx]
+        elif player.state == PlayerState.ATTACK:
+            frames = self.animations["attack2"] if player.pending_attack_id == 2 else self.animations["attack1"]
+            idx = (tick // 3) % max(1, len(frames))
+            frame = frames[idx]
+        elif player.state == PlayerState.ROLL:
+            frames = self.animations["run"]
+            idx = (tick // 3) % max(1, len(frames))
+            frame = frames[idx]
+        elif player.state == PlayerState.PARRY:
+            frames = self.animations["attack1"]
+            frame = frames[min(len(frames) - 1, 1)]  # Defensive parry cross-guard stance
+        elif player.state == PlayerState.SUPER:
+            frames = self.animations["attack2"]
+            idx = (tick // 3) % max(1, len(frames))
+            frame = frames[idx]
+        elif player.state == PlayerState.DRINK:
+            frames = self.animations["idle"]
+            frame = frames[0]
+        elif is_moving:
+            frames = self.animations["run"]
+            idx = (tick // 5) % max(1, len(frames))
+            frame = frames[idx]
+        else:
+            frames = self.animations["idle"]
+            idx = (tick // 6) % max(1, len(frames))
+            frame = frames[idx]
+
+        if not facing_right:
+            frame = pygame.transform.flip(frame, True, False)
+            draw_x = psx - (self.scaled_w - self.center_x_offset)
+        else:
+            draw_x = psx - self.center_x_offset
+
+        draw_y = psy - self.feet_y_offset
+        return frame, (draw_x, draw_y)
+
+
+class PunkRebelAnimator:
+    """Manages sprite frame slicing and weapon overlay for The Rebel (Revolver)."""
+    def __init__(self, punk_dir: str = "assets/2 Punk", pistol_dir: str = "assets/PISTOL", scale: float = 2.4):
+        self.scale = scale
+        self.frame_w = 48
+        self.frame_h = 48
+        self.scaled_w = int(self.frame_w * scale)
+        self.scaled_h = int(self.frame_h * scale)
+        self.center_x_offset = int(14 * scale)
+        self.feet_y_offset = int(47 * scale)
+
+        self.animations = {}
+        self.pistol_shoot = []
+        self.pistol_reload = []
+        self.pistol_idle = []
+        self.loaded = False
+        self._load_sprites(punk_dir, pistol_dir)
+
+    def _load_sprites(self, punk_dir: str, pistol_dir: str):
+        if not os.path.exists(punk_dir) or not os.path.exists(pistol_dir):
+            return
+        configs = [
+            ("idle", "Punk_idle.png", 4),
+            ("run", "Punk_run.png", 6),
+            ("jump", "Punk_jump.png", 4),
+            ("attack1", "Punk_attack1.png", 6),
+            ("attack2", "Punk_attack2.png", 8),
+            ("punch", "Punk_punch.png", 6),
+            ("hurt", "Punk_hurt.png", 2),
+            ("death", "Punk_death.png", 6),
+        ]
+        try:
+            for name, fname, count in configs:
+                fpath = os.path.join(punk_dir, fname)
+                if not os.path.exists(fpath):
+                    return
+                sheet = pygame.image.load(fpath).convert_alpha()
+                frames = []
+                for c in range(count):
+                    sub = sheet.subsurface((c * self.frame_w, 0, self.frame_w, self.frame_h))
+                    scaled = pygame.transform.scale(sub, (self.scaled_w, self.scaled_h))
+                    frames.append(scaled)
+                self.animations[name] = frames
+
+            # Load Pistol GIF frame sequences
+            def load_gif_frames(path, p_scale=1.4):
+                im = Image.open(path)
+                frames = []
+                for i in range(im.n_frames):
+                    im.seek(i)
+                    rgba = im.convert("RGBA")
+                    raw_str = rgba.tobytes("raw", "RGBA")
+                    surf = pygame.image.fromstring(raw_str, rgba.size, "RGBA")
+                    if p_scale != 1.0:
+                        surf = pygame.transform.scale(surf, (int(rgba.size[0] * p_scale), int(rgba.size[1] * p_scale)))
+                    frames.append(surf)
+                return frames
+
+            self.pistol_shoot = load_gif_frames(os.path.join(pistol_dir, "[shootingFX]PistolV1.01.gif"), p_scale=1.4)
+            self.pistol_reload = load_gif_frames(os.path.join(pistol_dir, "[animated] Pistol_V1.00_RELOAD.gif"), p_scale=1.4)
+            self.pistol_idle = load_gif_frames(os.path.join(pistol_dir, "[animated] PistolV1.00.gif"), p_scale=1.4)
+            self.loaded = True
+        except Exception as e:
+            print(f"[Renderer] Could not load 2 Punk or Pistol assets: {e}")
+            self.loaded = False
+
+    def get_body_and_gun(self, player, facing_right: bool, is_moving: bool, tick: int, death_tick: int, psx: int, psy: int):
+        if not self.loaded:
+            return None, (0, 0), None, (0, 0)
+
+        # 1. Body Animation
+        if player.hearts <= 0:
+            frames = self.animations["death"]
+            idx = min(len(frames) - 1, death_tick // 4)
+            body_frame = frames[idx]
+        elif player.airborne:
+            frames = self.animations["jump"]
+            idx = (tick // 6) % max(1, len(frames))
+            body_frame = frames[idx]
+        elif player.state == PlayerState.ATTACK:
+            frames = self.animations["punch"]
+            idx = (tick // 3) % max(1, len(frames))
+            body_frame = frames[idx]
+        elif player.state == PlayerState.ROLL:
+            frames = self.animations["run"]
+            idx = (tick // 3) % max(1, len(frames))
+            body_frame = frames[idx]
+        elif player.state == PlayerState.PARRY:
+            frames = self.animations["idle"]
+            body_frame = frames[min(len(frames) - 1, 2)]
+        elif is_moving:
+            frames = self.animations["run"]
+            idx = (tick // 5) % max(1, len(frames))
+            body_frame = frames[idx]
+        else:
+            frames = self.animations["idle"]
+            idx = (tick // 6) % max(1, len(frames))
+            body_frame = frames[idx]
+
+        # 2. Revolver Overlay Animation
+        gun_frame = None
+        gun_ox, gun_oy = 0, 0
+        if player.hearts > 0:
+            if player.state == PlayerState.ATTACK:
+                frames = self.pistol_shoot
+                idx = (tick // 2) % max(1, len(frames))
+                gun_frame = frames[idx]
+                gun_ox = -4 if facing_right else 4  # Recoil kickback
+            elif player.reload_timer > 0:
+                frames = self.pistol_reload
+                rel_frac = 1.0 - (player.reload_timer / max(1, C.sec(C.REVOLVER_RELOAD_S)))
+                idx = min(len(frames) - 1, int(rel_frac * len(frames)))
+                gun_frame = frames[idx]
+                gun_oy = 4  # Barrel tilted downward
+            else:
+                gun_frame = self.pistol_idle[0]
+
+        # Flipping and placement
+        if not facing_right:
+            body_frame = pygame.transform.flip(body_frame, True, False)
+            body_x = psx - (self.scaled_w - self.center_x_offset)
+            if gun_frame:
+                gun_frame = pygame.transform.flip(gun_frame, True, False)
+                gun_x = psx - 52 + gun_ox
+                gun_y = psy - 55 + gun_oy
+        else:
+            body_x = psx - self.center_x_offset
+            if gun_frame:
+                gun_x = psx + 2 + gun_ox
+                gun_y = psy - 55 + gun_oy
+
+        body_y = psy - self.feet_y_offset
+        return body_frame, (body_x, body_y), gun_frame, (gun_x if gun_frame else 0, gun_y if gun_frame else 0)
+
+
 class Renderer:
     def __init__(self, width: int = 1280, height: int = 720):
         self.width = width
@@ -137,8 +367,12 @@ class Renderer:
 
         # Sprite animators
         self.boss_animator = NightBorneBossAnimator()
+        self.hero_animator = HeroKnightAnimator()
+        self.rebel_animator = PunkRebelAnimator()
         self.anim_tick = 0
         self.boss_death_timer = 0
+        self.player_death_timer = 0
+        self._prev_player_x = 150.0
 
     def world_to_screen(self, x: float, y: float = 0.0):
         sx = int(self.arena_left + x * self.scale)
@@ -352,29 +586,75 @@ class Renderer:
         pw, ph = 38, 74
         player_rect = pygame.Rect(psx - pw // 2, psy - ph, pw, ph)
 
+        # Check death timer for player
+        if p.hearts <= 0:
+            self.player_death_timer += 1
+        else:
+            self.player_death_timer = 0
+
+        # Movement tracking
+        is_moving = abs(p.x - getattr(self, "_prev_player_x", p.x)) > 0.05
+        self._prev_player_x = p.x
+
+        facing_boss = 1 if b.x > p.x else -1
+        facing_right = facing_boss > 0
+
         # Invulnerability aura
         if p.iframes > 0:
-            glow_surf = pygame.Surface((pw + 20, ph + 20), pygame.SRCALPHA)
-            glow_color = (255, 60, 80, 120) if p.state == PlayerState.SUPER else (130, 220, 255, 100)
-            pygame.draw.rect(glow_surf, glow_color, (0, 0, pw + 20, ph + 20), border_radius=10)
-            self.screen.blit(glow_surf, (psx - pw // 2 - 10, psy - ph - 10))
+            glow_surf = pygame.Surface((pw + 24, ph + 24), pygame.SRCALPHA)
+            glow_color = (255, 60, 80, 140) if p.state == PlayerState.SUPER else (130, 220, 255, 120)
+            pygame.draw.rect(glow_surf, glow_color, (0, 0, pw + 24, ph + 24), border_radius=12)
+            self.screen.blit(glow_surf, (psx - pw // 2 - 12, psy - ph - 12))
 
-        # Player color by state
-        if p.state == PlayerState.ROLL:
-            p_color = (100, 200, 255)
-        elif p.state == PlayerState.PARRY:
-            p_color = (255, 225, 70)
-        elif p.state == PlayerState.SUPER:
-            p_color = (240, 30, 60)
-        elif p.state == PlayerState.ATTACK:
-            p_color = (255, 150, 40)
-        elif p.state == PlayerState.DRINK:
-            p_color = (70, 220, 130)
-        else:
-            p_color = (70, 140, 230)
+        # Check which character animator to use
+        rendered_sprite = False
+        if env.weapon.name == "katana" and self.hero_animator.loaded:
+            frame, (draw_x, draw_y) = self.hero_animator.get_frame_and_rect(
+                player=p,
+                facing_right=facing_right,
+                is_moving=is_moving,
+                tick=self.anim_tick,
+                death_tick=self.player_death_timer,
+                psx=psx,
+                psy=psy,
+            )
+            if frame is not None:
+                self.screen.blit(frame, (draw_x, draw_y))
+                rendered_sprite = True
 
-        pygame.draw.rect(self.screen, p_color, player_rect, border_radius=5)
-        pygame.draw.rect(self.screen, (15, 25, 50), player_rect, width=2, border_radius=5)
+        elif env.weapon.name == "revolver" and self.rebel_animator.loaded:
+            body_frame, (bx, by), gun_frame, (gx, gy) = self.rebel_animator.get_body_and_gun(
+                player=p,
+                facing_right=facing_right,
+                is_moving=is_moving,
+                tick=self.anim_tick,
+                death_tick=self.player_death_timer,
+                psx=psx,
+                psy=psy,
+            )
+            if body_frame is not None:
+                self.screen.blit(body_frame, (bx, by))
+                if gun_frame is not None:
+                    self.screen.blit(gun_frame, (gx, gy))
+                rendered_sprite = True
+
+        if not rendered_sprite:
+            # Fallback to geometric rectangle
+            if p.state == PlayerState.ROLL:
+                p_color = (100, 200, 255)
+            elif p.state == PlayerState.PARRY:
+                p_color = (255, 225, 70)
+            elif p.state == PlayerState.SUPER:
+                p_color = (240, 30, 60)
+            elif p.state == PlayerState.ATTACK:
+                p_color = (255, 150, 40)
+            elif p.state == PlayerState.DRINK:
+                p_color = (70, 220, 130)
+            else:
+                p_color = (70, 140, 230)
+
+            pygame.draw.rect(self.screen, p_color, player_rect, border_radius=5)
+            pygame.draw.rect(self.screen, (15, 25, 50), player_rect, width=2, border_radius=5)
 
         # Player attack visuals
         facing_boss = 1 if b.x > p.x else -1
