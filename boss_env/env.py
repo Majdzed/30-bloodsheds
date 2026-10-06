@@ -6,6 +6,7 @@ Status: Katana combat complete with abilities 1 (Lightning Strike) and 4 (Light 
         Jump, Roll, Parry, Super (Blood Katana), and rewards.
 """
 
+import math
 from enum import IntEnum
 
 import gymnasium as gym
