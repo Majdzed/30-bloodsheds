@@ -89,8 +89,10 @@ bolt_observed = False
 max_bolt_rel_x = 0.0
 
 for step in range(200):
-    # Keep player at distance
+    # Keep player and boss at distance
     env4.player.x = 100.0
+    if env4.boss.x < 400.0:
+        env4.boss.x = 700.0
     obs, reward, terminated, truncated, _ = env4.step(Action.IDLE)
     
     proj_rel_x = obs[OBS_SCALARS.index("proj_light_rel_x")]

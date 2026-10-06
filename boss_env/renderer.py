@@ -4,11 +4,111 @@ Renders player, boss, projectiles, ability telegraphs, and full HUD.
 Only reads env state; never modifies it.
 """
 
+import os
 import math
 import pygame
 from . import constants as C
 from .abilities import ABILITIES
 from .entities import PlayerState, BossState
+
+
+class NightBorneBossAnimator:
+    """Manages sprite frame slicing and animation state for the NightBorne boss."""
+    def __init__(self, sprite_path: str = "assets/NightBorne.png", scale: float = 3.0):
+        self.scale = scale
+        self.frame_w = 80
+        self.frame_h = 80
+        self.scaled_w = int(self.frame_w * scale)
+        self.scaled_h = int(self.frame_h * scale)
+        self.feet_y_offset = int(63 * scale)    # Baseline where feet touch the ground (y ≈ 63 in 80px cell)
+        self.center_x_offset = int(36 * scale)  # Visual center of character body (x ≈ 36 in 80px cell)
+
+        self.animations = {
+            "idle": [],
+            "run": [],
+            "attack": [],
+            "hurt": [],
+            "death": []
+        }
+        self.loaded = False
+        self._load_spritesheet(sprite_path)
+
+    def _load_spritesheet(self, path: str):
+        if not os.path.exists(path):
+            return
+        try:
+            sheet = pygame.image.load(path).convert_alpha()
+            rows_config = [
+                ("idle", 0, 9),
+                ("run", 1, 6),
+                ("attack", 2, 12),
+                ("hurt", 3, 5),
+                ("death", 4, 23),
+            ]
+            for name, row, count in rows_config:
+                frames = []
+                for col in range(count):
+                    rect = pygame.Rect(col * self.frame_w, row * self.frame_h, self.frame_w, self.frame_h)
+                    sub = sheet.subsurface(rect)
+                    scaled = pygame.transform.scale(sub, (self.scaled_w, self.scaled_h))
+                    frames.append(scaled)
+                self.animations[name] = frames
+            self.loaded = True
+        except Exception as e:
+            print(f"[Renderer] Could not load NightBorne sprite: {e}")
+            self.loaded = False
+
+    def get_frame_and_rect(self, boss, player_x: float, tick: int, death_tick: int, windup_total: int, bsx: int, bsy: int):
+        """Returns (surface, (draw_x, draw_y)) for current boss state."""
+        if not self.loaded:
+            return None, (0, 0)
+
+        facing_right = player_x >= boss.x
+
+        if boss.hp <= 0:
+            frames = self.animations["death"]
+            idx = min(len(frames) - 1, death_tick // 4)
+            frame = frames[idx]
+        elif boss.state == BossState.STUN:
+            frames = self.animations["hurt"]
+            idx = (tick // 6) % len(frames)
+            frame = frames[idx]
+        elif boss.state == BossState.WINDUP:
+            frames = self.animations["attack"]
+            # Attack frames 0..6 represent the sword raising windup
+            wt = max(1, windup_total)
+            progress = 1.0 - (boss.action_timer / wt)
+            idx = min(6, int(progress * 7))
+            frame = frames[idx]
+        elif boss.state == BossState.ATTACK:
+            frames = self.animations["attack"]
+            # Attack frames 7..11 are the slash and recovery follow-through
+            idx = 7 + min(4, (tick // 3) % 5)
+            frame = frames[idx]
+        elif boss.state == BossState.HEAL:
+            # Siphon Heal: casting posture with raised blade
+            frames = self.animations["attack"]
+            frame = frames[4]
+        else:
+            # Idle vs Movement
+            dist_to_player = abs(player_x - boss.x)
+            if dist_to_player > 100.0:
+                frames = self.animations["run"]
+                idx = (tick // 5) % len(frames)
+            else:
+                frames = self.animations["idle"]
+                idx = (tick // 6) % len(frames)
+            frame = frames[idx]
+
+        # NightBorne faces RIGHT natively; flip if facing left
+        if not facing_right:
+            frame = pygame.transform.flip(frame, True, False)
+            draw_x = bsx - (self.scaled_w - self.center_x_offset)
+        else:
+            draw_x = bsx - self.center_x_offset
+
+        draw_y = bsy - self.feet_y_offset
+        return frame, (draw_x, draw_y)
 
 
 class Renderer:
@@ -34,6 +134,11 @@ class Renderer:
         self.arena_right = self.arena_left + int(C.ARENA_W * self.scale)   # 1140 px
         self.ground_y = 540
 
+        # Sprite animators
+        self.boss_animator = NightBorneBossAnimator()
+        self.anim_tick = 0
+        self.boss_death_timer = 0
+
     def world_to_screen(self, x: float, y: float = 0.0):
         sx = int(self.arena_left + x * self.scale)
         sy = int(self.ground_y - y * self.scale)
@@ -48,6 +153,11 @@ class Renderer:
             return
 
         now_ticks = pygame.time.get_ticks()
+        self.anim_tick += 1
+        if b.hp <= 0:
+            self.boss_death_timer += 1
+        else:
+            self.boss_death_timer = 0
 
         # -------------------------------------------------------------
         # 1. Background (Moonlit gothic courtyard)
@@ -120,40 +230,70 @@ class Renderer:
                 arc_rect = pygame.Rect(bsx if arc_dir > 0 else bsx - arc_w, bsy - 15, arc_w, 15)
                 pygame.draw.rect(self.screen, (255, 60, 60, 110), arc_rect, border_radius=4)
 
-        # Boss color
-        if b.state == BossState.STUN:
-            b_color = (110, 110, 125)
-        elif b.state == BossState.ATTACK:
-            b_color = (230, 40, 60)
-        elif b.state == BossState.WINDUP:
-            b_color = (190, 50, 80)
-        elif b.state == BossState.HEAL:
-            b_color = (50, 200, 120)
-        else:
-            b_color = (130, 40, 150)
-
-        pygame.draw.rect(self.screen, b_color, boss_rect, border_radius=6)
-        pygame.draw.rect(self.screen, (20, 10, 25), boss_rect, width=2, border_radius=6)
-
-        # Boss eyes
-        eye_dir = 1 if p.x > b.x else -1
-        eye_x = bsx + eye_dir * 12
-        eye_color = (255, 230, 80) if b.state != BossState.STUN else (70, 70, 70)
-        pygame.draw.circle(self.screen, eye_color, (eye_x, bsy - bh + 25), 4)
-
-        # Boss Melee / Frenzy slash visuals
-        if b.state == BossState.ATTACK:
-            slash_len = int(130 * self.scale)
-            slash_dir = 1 if p.x > b.x else -1
-            slash_color = (255, 80, 80) if b.current_ability_id == 7 else (255, 220, 100)
-            pygame.draw.arc(
-                self.screen,
-                slash_color,
-                pygame.Rect(bsx - slash_len if slash_dir < 0 else bsx, bsy - bh, slash_len, bh),
-                0 if slash_dir > 0 else math.pi / 2,
-                math.pi / 2 if slash_dir > 0 else math.pi,
-                7 if b.current_ability_id == 7 else 5,
+        if self.boss_animator.loaded:
+            windup_total = getattr(env, "_boss_windup_total", 30)
+            frame, (draw_x, draw_y) = self.boss_animator.get_frame_and_rect(
+                boss=b,
+                player_x=p.x,
+                tick=self.anim_tick,
+                death_tick=self.boss_death_timer,
+                windup_total=windup_total,
+                bsx=bsx,
+                bsy=bsy,
             )
+
+            # Boss Stun visual indicator (dizzy stars orbiting above head)
+            if b.state == BossState.STUN:
+                for star_i in range(3):
+                    star_angle = (now_ticks * 0.008) + star_i * (2 * math.pi / 3)
+                    star_x = bsx + int(24 * math.cos(star_angle))
+                    star_y = bsy - int(bh * 1.1) + int(8 * math.sin(star_angle))
+                    pygame.draw.circle(self.screen, (255, 230, 80), (star_x, star_y), 3)
+
+            # Boss Siphon Heal aura (pulsing green siphon circle)
+            if b.state == BossState.HEAL:
+                heal_surf = pygame.Surface((120, 120), pygame.SRCALPHA)
+                alpha = int(70 + 40 * math.sin(now_ticks * 0.02))
+                pygame.draw.circle(heal_surf, (50, 230, 120, alpha), (60, 60), 50)
+                self.screen.blit(heal_surf, (bsx - 60, bsy - 100))
+
+            if frame is not None:
+                self.screen.blit(frame, (draw_x, draw_y))
+        else:
+            # Fallback to geometric rectangle
+            if b.state == BossState.STUN:
+                b_color = (110, 110, 125)
+            elif b.state == BossState.ATTACK:
+                b_color = (230, 40, 60)
+            elif b.state == BossState.WINDUP:
+                b_color = (190, 50, 80)
+            elif b.state == BossState.HEAL:
+                b_color = (50, 200, 120)
+            else:
+                b_color = (130, 40, 150)
+
+            pygame.draw.rect(self.screen, b_color, boss_rect, border_radius=6)
+            pygame.draw.rect(self.screen, (20, 10, 25), boss_rect, width=2, border_radius=6)
+
+            # Boss eyes
+            eye_dir = 1 if p.x > b.x else -1
+            eye_x = bsx + eye_dir * 12
+            eye_color = (255, 230, 80) if b.state != BossState.STUN else (70, 70, 70)
+            pygame.draw.circle(self.screen, eye_color, (eye_x, bsy - bh + 25), 4)
+
+            # Boss Melee / Frenzy slash visuals
+            if b.state == BossState.ATTACK:
+                slash_len = int(130 * self.scale)
+                slash_dir = 1 if p.x > b.x else -1
+                slash_color = (255, 80, 80) if b.current_ability_id == 7 else (255, 220, 100)
+                pygame.draw.arc(
+                    self.screen,
+                    slash_color,
+                    pygame.Rect(bsx - slash_len if slash_dir < 0 else bsx, bsy - bh, slash_len, bh),
+                    0 if slash_dir > 0 else math.pi / 2,
+                    math.pi / 2 if slash_dir > 0 else math.pi,
+                    7 if b.current_ability_id == 7 else 5,
+                )
 
         # -------------------------------------------------------------
         # 4. Projectiles and Special Hazards
