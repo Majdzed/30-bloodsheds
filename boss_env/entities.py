@@ -143,6 +143,7 @@ class Boss:
 
     # --- spatial ---
     x: float = 650.0           # starting position near the right wall
+    y: float = 0.0             # 0 = ground, > 0 = airborne/floating in sky
 
     # --- vitals ---
     hp: float = 150.0

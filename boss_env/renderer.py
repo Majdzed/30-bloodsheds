@@ -158,7 +158,7 @@ class HeroKnightAnimator:
             print(f"[Renderer] Could not load Hero Knight sprites: {e}")
             self.loaded = False
 
-    def get_frame_and_rect(self, player, facing_right: bool, is_moving: bool, tick: int, death_tick: int, psx: int, psy: int):
+    def get_frame_and_rect(self, player, facing_right: bool, is_moving: bool, tick: int, death_tick: int, psx: int, psy: int, is_shocked: bool = False):
         if not self.loaded:
             return None, (0, 0)
 
@@ -166,6 +166,9 @@ class HeroKnightAnimator:
             frames = self.animations["death"]
             idx = min(len(frames) - 1, death_tick // 4)
             frame = frames[idx]
+        elif is_shocked:
+            frames = self.animations.get("hurt", self.animations["idle"])
+            frame = frames[0]
         elif player.airborne:
             frames = self.animations["jump"] if player.vy > 0 else self.animations["fall"]
             idx = (tick // 6) % max(1, len(frames))
@@ -277,7 +280,7 @@ class PunkRebelAnimator:
             print(f"[Renderer] Could not load 2 Punk or Pistol assets: {e}")
             self.loaded = False
 
-    def get_body_and_gun(self, player, facing_right: bool, is_moving: bool, tick: int, death_tick: int, psx: int, psy: int):
+    def get_body_and_gun(self, player, facing_right: bool, is_moving: bool, tick: int, death_tick: int, psx: int, psy: int, is_shocked: bool = False):
         if not self.loaded:
             return None, (0, 0), None, (0, 0)
 
@@ -286,6 +289,9 @@ class PunkRebelAnimator:
             frames = self.animations["death"]
             idx = min(len(frames) - 1, death_tick // 4)
             body_frame = frames[idx]
+        elif is_shocked:
+            frames = self.animations.get("hurt", self.animations["idle"])
+            body_frame = frames[0]
         elif player.airborne:
             frames = self.animations["jump"]
             idx = (tick // 6) % max(1, len(frames))
@@ -366,6 +372,7 @@ class Renderer:
         self.font_main = pygame.font.SysFont("arial", 18, bold=True)
         self.font_small = pygame.font.SysFont("arial", 14)
         self.font_hud = pygame.font.SysFont("consolas", 16, bold=True)
+        self.font_undertale = pygame.font.SysFont("consolas", 20, bold=True)
 
         # Arena mapping
         self.scale = 1.25  # 800 * 1.25 = 1000 px
@@ -455,9 +462,19 @@ class Renderer:
         # -------------------------------------------------------------
         # 3. Boss Rendering
         # -------------------------------------------------------------
-        bsx, bsy = self.world_to_screen(b.x, 0.0)
+        bsx, bsy = self.world_to_screen(b.x, getattr(b, "y", 0.0))
         bw, bh = 54, 96
         boss_rect = pygame.Rect(bsx - bw // 2, bsy - bh, bw, bh)
+
+        # Ground shadow if boss is elevated / floating in sky
+        boss_y = getattr(b, "y", 0.0)
+        if boss_y > 3.0:
+            shadow_ratio = max(0.15, 1.0 - min(1.0, boss_y / 150.0))
+            sw = int(bw * 1.3 * shadow_ratio)
+            sh = int(14 * shadow_ratio)
+            shadow_surf = pygame.Surface((sw * 2, sh * 2), pygame.SRCALPHA)
+            pygame.draw.ellipse(shadow_surf, (0, 0, 0, int(130 * shadow_ratio)), (0, 0, sw * 2, sh * 2))
+            self.screen.blit(shadow_surf, (bsx - sw, self.ground_y - sh))
 
         # Windup aura
         if b.state == BossState.WINDUP:
@@ -466,6 +483,23 @@ class Renderer:
             color = (255, 50, 50, 70) if b.current_ability_id in (1, 7) else (180, 50, 255, 70)
             pygame.draw.circle(aura_surf, color, (aura_radius, aura_radius), aura_radius)
             self.screen.blit(aura_surf, (bsx - aura_radius, bsy - bh // 2 - aura_radius))
+
+            # Ability 6 Ultimate Dark Orb Charging in Sky
+            if b.current_ability_id == 6:
+                windup_tot = max(1, getattr(env, "_boss_windup_total", 72))
+                charge_prog = 1.0 - (b.action_timer / windup_tot)
+                orb_r = int(18 + 24 * charge_prog)
+                c_surf = pygame.Surface((orb_r * 2 + 20, orb_r * 2 + 20), pygame.SRCALPHA)
+                center = orb_r + 10
+                pygame.draw.circle(c_surf, (60, 5, 100, 190), (center, center), orb_r)
+                pygame.draw.circle(c_surf, (180, 40, 255, 230), (center, center), int(orb_r * 0.7))
+                pygame.draw.circle(c_surf, (255, 230, 255), (center, center), int(orb_r * 0.3))
+                self.screen.blit(c_surf, (bsx - center, bsy - bh // 2 - center))
+                for _ in range(4):
+                    lx = bsx + random.randint(-orb_r - 12, orb_r + 12)
+                    ly = bsy - bh // 2 + random.randint(-orb_r - 12, orb_r + 12)
+                    pygame.draw.line(self.screen, (220, 140, 255), (bsx, bsy - bh // 2), (lx, ly), 2)
+
             # Melee warning arc for Ability 7 (Dual-Blade Frenzy)
             if b.current_ability_id == 7:
                 arc_w = int(120 * self.scale)
@@ -578,14 +612,7 @@ class Renderer:
 
         # 4D. Ultimate Dark Orb (Ability 6)
         for orb in env._dark_orbs:
-            ox, _ = self.world_to_screen(orb["x"], 0.0)
-            # Arena-height towering sphere
-            orb_radius = int(85 * self.scale)
-            orb_surf = pygame.Surface((orb_radius * 2, self.height), pygame.SRCALPHA)
-            pygame.draw.circle(orb_surf, (80, 10, 110, 200), (orb_radius, self.ground_y // 2), orb_radius)
-            pygame.draw.circle(orb_surf, (220, 60, 255, 120), (orb_radius, self.ground_y // 2), orb_radius - 15)
-            pygame.draw.circle(orb_surf, (255, 255, 255, 230), (orb_radius, self.ground_y // 2), 20)
-            self.screen.blit(orb_surf, (ox - orb_radius, 0))
+            self._draw_dark_orb(orb, now_ticks)
 
         # -------------------------------------------------------------
         # 5. Player Rendering
@@ -607,6 +634,17 @@ class Renderer:
         facing_boss = 1 if b.x > p.x else -1
         facing_right = (p.roll_dir > 0) if p.state == PlayerState.ROLL else (facing_boss > 0)
 
+        # Check if player is shocked by boss preparing Dark Orb in the sky
+        is_shocked = (b.state == BossState.WINDUP and b.current_ability_id == 6)
+        if is_shocked:
+            # Startled "!" bubble above player's head
+            ex_x = psx
+            ex_y = psy - ph - 22 + int(3 * math.sin(now_ticks * 0.03))
+            pygame.draw.circle(self.screen, (255, 255, 255), (ex_x, ex_y), 10)
+            pygame.draw.circle(self.screen, (20, 20, 30), (ex_x, ex_y), 10, 2)
+            txt_ex = self.font_main.render("!", True, (255, 40, 50))
+            self.screen.blit(txt_ex, (ex_x - txt_ex.get_width() // 2, ex_y - txt_ex.get_height() // 2 - 1))
+
         # Roll dash effects (dust puffs, ghost afterimages, slipstream streaks)
         if p.state == PlayerState.ROLL:
             self._draw_roll_effects(p, psx, psy, pw, ph, now_ticks)
@@ -622,6 +660,7 @@ class Renderer:
                 death_tick=self.player_death_timer,
                 psx=psx,
                 psy=psy,
+                is_shocked=is_shocked,
             )
             if frame is not None:
                 self.screen.blit(frame, (draw_x, draw_y))
@@ -636,6 +675,7 @@ class Renderer:
                 death_tick=self.player_death_timer,
                 psx=psx,
                 psy=psy,
+                is_shocked=is_shocked,
             )
             if body_frame is not None:
                 self.screen.blit(body_frame, (bx, by))
@@ -692,6 +732,22 @@ class Renderer:
         # 6. Full HUD Interface
         # -------------------------------------------------------------
         self._draw_hud(env)
+
+        # -------------------------------------------------------------
+        # 7. Undertale Boss Dialogue & Parry Counter Burst
+        # -------------------------------------------------------------
+        if b.state == BossState.WINDUP and b.current_ability_id == 6:
+            self._draw_undertale_dialogue("BEHOLD... MORTAL.", bsx, bsy)
+        elif getattr(env, "dark_orb_dialogue", ""):
+            self._draw_undertale_dialogue(env.dark_orb_dialogue, bsx, bsy)
+
+        # Radiant parry counter burst
+        if getattr(env, "dark_orb_countered", False) and getattr(env, "dark_orb_dialogue_timer", 0) > 60:
+            c_radius = int(55 + 20 * math.sin(now_ticks * 0.08))
+            c_surf = pygame.Surface((c_radius * 2, c_radius * 2), pygame.SRCALPHA)
+            pygame.draw.circle(c_surf, (255, 230, 120, 190), (c_radius, c_radius), c_radius, 4)
+            pygame.draw.circle(c_surf, (240, 140, 255, 220), (c_radius, c_radius), int(c_radius * 0.65), 3)
+            self.screen.blit(c_surf, (psx - c_radius, psy - ph // 2 - c_radius))
 
         pygame.display.flip()
         self.clock.tick(C.FPS)
@@ -1110,6 +1166,86 @@ class Renderer:
             s_start = (psx, psy - off_y)
             s_end = (psx - facing_mult * streak_len, psy - off_y)
             pygame.draw.line(self.screen, (220, 245, 255), s_start, s_end, 2)
+
+    def _draw_undertale_dialogue(self, text: str, speaker_x: int, speaker_y: int):
+        """Renders an authentic Undertale-style dialogue box with black fill, thick white pixel border, and asterisk."""
+        if not text:
+            return
+
+        rendered_text = f"* {text}"
+        txt_surf = self.font_undertale.render(rendered_text, True, (255, 255, 255))
+
+        pad_x = 18
+        pad_y = 12
+        box_w = txt_surf.get_width() + pad_x * 2
+        box_h = txt_surf.get_height() + pad_y * 2
+
+        # Position box above/beside speaker, clamped within screen margins
+        box_x = speaker_x - box_w // 2
+        box_y = speaker_y - box_h - 26
+
+        box_x = max(30, min(self.width - box_w - 30, box_x))
+        box_y = max(30, min(self.height - box_h - 30, box_y))
+
+        # 1. Solid black background
+        pygame.draw.rect(self.screen, (0, 0, 0), (box_x, box_y, box_w, box_h), border_radius=4)
+
+        # 2. Outer crisp white pixel border (3px)
+        pygame.draw.rect(self.screen, (255, 255, 255), (box_x, box_y, box_w, box_h), width=3, border_radius=4)
+
+        # 3. Speech pointer tail pointing towards speaker
+        tail_start_x = min(max(box_x + 25, speaker_x), box_x + box_w - 25)
+        tail_pts = [
+            (tail_start_x - 8, box_y + box_h),
+            (tail_start_x + 8, box_y + box_h),
+            (speaker_x, min(speaker_y - 15, box_y + box_h + 16))
+        ]
+        pygame.draw.polygon(self.screen, (0, 0, 0), tail_pts)
+        pygame.draw.line(self.screen, (255, 255, 255), tail_pts[0], tail_pts[2], 2)
+        pygame.draw.line(self.screen, (255, 255, 255), tail_pts[1], tail_pts[2], 2)
+
+        # 4. Text blit
+        self.screen.blit(txt_surf, (box_x + pad_x, box_y + pad_y))
+
+    def _draw_dark_orb(self, orb, now_ticks: int):
+        """Renders the descending cosmic Ultimate Dark Orb with vortex corona and crackling dark lightning."""
+        ox, oy = self.world_to_screen(orb["x"], orb.get("y", 35.0))
+        o_dir = orb.get("dir", 1.0)
+        r = int(58 * self.scale)
+
+        # 1. Cometary comet tail streaming behind the ball
+        for i in range(8):
+            tail_x = ox - int(o_dir * (20 + i * 18)) + random.randint(-8, 8)
+            tail_y = oy + random.randint(-16, 16)
+            tail_r = max(2, int((r * 0.6) * (1.0 - i / 8.0)))
+            t_surf = pygame.Surface((tail_r * 2, tail_r * 2), pygame.SRCALPHA)
+            t_alpha = int(140 * (1.0 - i / 8.0))
+            pygame.draw.circle(t_surf, (150, 20, 220, t_alpha), (tail_r, tail_r), tail_r)
+            self.screen.blit(t_surf, (tail_x - tail_r, tail_y - tail_r))
+
+        # 2. Multi-layered pulsing cosmic dark sphere
+        pulse_r = int(r + 5 * math.sin(now_ticks * 0.02))
+        surf = pygame.Surface((pulse_r * 2 + 20, pulse_r * 2 + 20), pygame.SRCALPHA)
+        center = pulse_r + 10
+        # Outer dark violet coronal flames
+        pygame.draw.circle(surf, (60, 5, 100, 190), (center, center), pulse_r)
+        # Mid glowing royal purple
+        pygame.draw.circle(surf, (170, 30, 240, 225), (center, center), int(pulse_r * 0.72))
+        # Inner searing bright magenta
+        pygame.draw.circle(surf, (240, 140, 255, 245), (center, center), int(pulse_r * 0.42))
+        # Core white singularity
+        pygame.draw.circle(surf, (255, 255, 255, 255), (center, center), int(pulse_r * 0.18))
+        self.screen.blit(surf, (ox - center, oy - center))
+
+        # 3. Crackling dark lightning arcs wrapping around the ball
+        for _ in range(3):
+            ang1 = random.uniform(0, math.pi * 2)
+            ang2 = ang1 + random.uniform(0.8, 1.8)
+            p1 = (ox + int(math.cos(ang1) * pulse_r), oy + int(math.sin(ang1) * pulse_r))
+            mid = (ox + int(math.cos((ang1 + ang2) / 2) * (pulse_r + random.randint(-10, 10))),
+                   oy + int(math.sin((ang1 + ang2) / 2) * (pulse_r + random.randint(-10, 10))))
+            p2 = (ox + int(math.cos(ang2) * pulse_r), oy + int(math.sin(ang2) * pulse_r))
+            pygame.draw.lines(self.screen, (230, 180, 255), False, [p1, mid, p2], 2)
 
     def close(self):
         pygame.quit()

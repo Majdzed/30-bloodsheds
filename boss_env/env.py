@@ -127,6 +127,9 @@ class BossFightEnv(gym.Env):
         self._dark_spikes   = []
         self._dark_orbs     = []
         self._heal_orbs     = []
+        self.dark_orb_dialogue = ""
+        self.dark_orb_dialogue_timer = 0
+        self.dark_orb_countered = False
 
         max_hp = C.boss_max_hp(self.fight)
         max_hearts = C.max_hearts_for_fight(self.fight, self.upgrade)
@@ -444,8 +447,9 @@ class BossFightEnv(gym.Env):
                 p.vy      = 0.0
                 p.airborne = False
 
-        # ---- Player horizontal movement (allowed when idle or attacking; locked during roll, parry, super, drink) ----
-        if p.state not in (PlayerState.ROLL, PlayerState.PARRY, PlayerState.SUPER, PlayerState.DRINK):
+        # ---- Player horizontal movement (allowed when idle or attacking; locked during roll, parry, super, drink, or when shocked by Dark Orb) ----
+        shocked_by_boss = (b.state == BossState.WINDUP and b.current_ability_id == 6)
+        if not shocked_by_boss and p.state not in (PlayerState.ROLL, PlayerState.PARRY, PlayerState.SUPER, PlayerState.DRINK):
             if action == Action.MOVE_LEFT:
                 p.x -= C.PLAYER_SPEED * dt
                 p.last_move_dir = -1.0
@@ -537,6 +541,15 @@ class BossFightEnv(gym.Env):
         for orb in self._dark_orbs:
             prev_x = orb["x"]
             orb["x"] += orb["dir"] * C.DARK_ORB_SPEED * dt
+            if "start_x" in orb and "target_x" in orb:
+                dist_total = max(1.0, abs(orb["target_x"] - orb["start_x"]))
+                curr_dist = abs(orb["x"] - orb["start_x"])
+                frac = min(1.0, curr_dist / dist_total)
+                start_y = orb.get("start_y", 110.0)
+                orb["y"] = start_y * (1.0 - frac) + 32.0 * frac
+            else:
+                orb["y"] = 35.0
+
             crossed = (prev_x - p.x) * (orb["x"] - p.x) <= 0
             close = abs(orb["x"] - p.x) <= C.DARK_ORB_HIT_RADIUS
             if (crossed or close) and not orb.get("hit"):
@@ -544,11 +557,17 @@ class BossFightEnv(gym.Env):
                     # Parried! Negate hit, +1 super stack (no boss stun, ranged/fullscreen)
                     p.super_stacks = min(p.super_stacks + 1, C.SUPER_STACKS_REQUIRED)
                     self._tick_reward += C.REWARD["parry"]
+                    self.dark_orb_dialogue = "IMPRESSIVE."
+                    self.dark_orb_dialogue_timer = 110
+                    self.dark_orb_countered = True
                 else:
                     # Roll i-frames do NOT avoid Dark Orb! Jump does NOT avoid it! (SPEC §3)
                     p.hearts -= 3
                     self._tick_reward += 3.0 * C.REWARD["heart_lost"]
                     self._hearts_lost += 3
+                    self.dark_orb_dialogue = "SUCH A DISAPPOINTMENT..."
+                    self.dark_orb_dialogue_timer = 110
+                    self.dark_orb_countered = False
                     if p.hearts <= 0:
                         self._terminated = True
                 orb["hit"] = True
@@ -558,8 +577,18 @@ class BossFightEnv(gym.Env):
 
         # ================================================================
         # Boss state machine
-
         # ================================================================
+        # --- countdown dialogue timer ---
+        if getattr(self, "dark_orb_dialogue_timer", 0) > 0:
+            self.dark_orb_dialogue_timer -= 1
+            if self.dark_orb_dialogue_timer == 0:
+                self.dark_orb_dialogue = ""
+
+        # --- Boss descends smoothly to ground if not charging Dark Orb ---
+        if not (b.state == BossState.WINDUP and b.current_ability_id == 6):
+            if getattr(b, "y", 0.0) > 0.0:
+                b.y = max(0.0, b.y - 160.0 * dt)
+
         # --- countdown any active timer ---
         if b.action_timer > 0:
             b.action_timer -= 1
@@ -583,6 +612,16 @@ class BossFightEnv(gym.Env):
                 target_x = p.x + (80.0 if b.x > p.x else -80.0)
                 b.x = float(np.clip(target_x, 0.0, C.ARENA_W))
                 b.blink_pending = False
+
+            # Ultimate Dark Orb: Boss floats up in the sky
+            if b.current_ability_id == 6:
+                windup_tot = max(1, self._boss_windup_total)
+                prog = 1.0 - (b.action_timer / windup_tot)
+                target_sky_y = 110.0
+                if prog < 0.35:
+                    b.y = target_sky_y * (prog / 0.35)
+                else:
+                    b.y = target_sky_y + 6.0 * math.sin(prog * math.pi * 3)
 
             # Windup finished → transition to ATTACK (or spawn projectile / hazard)
             if b.action_timer == 0:
@@ -625,9 +664,17 @@ class BossFightEnv(gym.Env):
                     b.state             = BossState.HEAL
                     b.action_timer      = ab["active"]
                 elif b.current_ability_id == 6:
-                    # Ultimate Dark Orb: sweep orb across arena
+                    # Ultimate Dark Orb: sweep descending dark energy orb across arena
                     direction = 1.0 if p.x > b.x else -1.0
-                    self._dark_orbs.append({"x": b.x, "dir": direction, "hit": False})
+                    self._dark_orbs.append({
+                        "x": b.x,
+                        "y": getattr(b, "y", 110.0),
+                        "start_x": b.x,
+                        "start_y": getattr(b, "y", 110.0),
+                        "target_x": p.x,
+                        "dir": direction,
+                        "hit": False,
+                    })
                     b.state              = BossState.IDLE
                     b.current_ability_id = 0
                     b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
@@ -789,12 +836,16 @@ class BossFightEnv(gym.Env):
             or p.recovery_timer > 0
         )
 
-        # Movement blocked only during locked actions (roll, parry, super, drink)
-        movement_locked = p.state in (
-            PlayerState.ROLL,
-            PlayerState.PARRY,
-            PlayerState.SUPER,
-            PlayerState.DRINK,
+        # Movement blocked only during locked actions (roll, parry, super, drink) or when shocked by Dark Orb
+        shocked_by_boss = (self.boss.state == BossState.WINDUP and self.boss.current_ability_id == 6) if self.boss else False
+        movement_locked = (
+            p.state in (
+                PlayerState.ROLL,
+                PlayerState.PARRY,
+                PlayerState.SUPER,
+                PlayerState.DRINK,
+            )
+            or shocked_by_boss
         )
         if movement_locked:
             mask[Action.MOVE_LEFT]  = False
