@@ -25,7 +25,28 @@ from boss_env.env import BossFightEnv
 from agents.rule_based import RuleBasedAgent
 
 
-def find_latest_model(model_dir: str = "models") -> str:
+def find_latest_model(model_dir: str = "models", weapon: str = "katana") -> str:
+    if not os.path.exists(model_dir):
+        return ""
+
+    # 1. Gauntlet final model for that weapon
+    gauntlet_final = os.path.join(model_dir, f"curriculum_{weapon}_gauntlet_final.zip")
+    if os.path.exists(gauntlet_final):
+        return gauntlet_final
+
+    # 2. Any final model matching that weapon
+    final_matches = glob.glob(os.path.join(model_dir, f"*_{weapon}_*final*.zip"))
+    if final_matches:
+        final_matches.sort(key=os.path.getmtime, reverse=True)
+        return final_matches[0]
+
+    # 3. Any model matching that weapon
+    weapon_matches = glob.glob(os.path.join(model_dir, f"*_{weapon}*.zip"))
+    if weapon_matches:
+        weapon_matches.sort(key=os.path.getmtime, reverse=True)
+        return weapon_matches[0]
+
+    # 4. Fallback to latest in directory
     models = glob.glob(os.path.join(model_dir, "*.zip"))
     if not models:
         return ""
@@ -115,7 +136,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     # 1. Load RL Agent
-    model_path = args.model or find_latest_model()
+    model_path = args.model or find_latest_model(weapon=args.weapon)
     rl_agent = None
     if model_path and os.path.exists(model_path):
         print(f"Loading trained RL model: {model_path}")
