@@ -356,6 +356,156 @@ class PunkRebelAnimator:
         return body_frame, (body_x, body_y), gun_frame, (gun_x if gun_frame else 0, gun_y if gun_frame else 0)
 
 
+class ColdCorridorsBackground:
+    """Renders the Cold Corridors gothic cathedral arena background with animated sconce torches,
+    pre-rendered 720p scaling, stone boundary pillars, volumetric torchlight halos, and embers."""
+    def __init__(self, asset_dir: str = "assets/Cold Corridors Files/Assets", width: int = 1280, height: int = 720, ground_y: int = 540):
+        self.width = width
+        self.height = height
+        self.ground_y = ground_y
+        self.loaded = False
+        self.bg_surface = None
+        self.torch_frames = []
+        self.torch_scale = 2.4
+        self.torch_positions = [
+            (140, 340),   # Left arena boundary column
+            (390, 325),   # Mid-left column
+            (640, 285),   # Grand central corridor archway
+            (890, 325),   # Mid-right column
+            (1140, 340),  # Right arena boundary column
+        ]
+        self.glow_surfaces = []
+        self.particles = []
+        self._load_assets(asset_dir)
+        if self.loaded:
+            self._precompute_glow()
+            self._init_particles()
+
+    def _load_assets(self, asset_dir: str):
+        preview_path = os.path.join(asset_dir, "preview.png")
+        torch_path = os.path.join(asset_dir, "Torch", "torch-sheet.png")
+        if not (os.path.exists(preview_path) and os.path.exists(torch_path)):
+            return
+
+        try:
+            # 560 x 224 scaled to match 720p height:
+            # 560 * (720 / 224) = 1800 width, 720 height.
+            # Floor row y=168 in the original image matches 168 * (720/224) = 540.0 exactly!
+            preview = pygame.image.load(preview_path)
+            try:
+                preview = preview.convert()
+            except Exception:
+                pass
+            scaled_w = int(560 * (self.height / 224.0))  # 1800 px
+            scaled_preview = pygame.transform.scale(preview, (scaled_w, self.height))
+            self.bg_surface = pygame.Surface((self.width, self.height))
+            x_offset = (self.width - scaled_w) // 2      # -260 px
+            self.bg_surface.blit(scaled_preview, (x_offset, 0))
+
+            # Torch sprite frames (128x32 -> 4 frames of 32x32)
+            torch_sheet = pygame.image.load(torch_path)
+            try:
+                torch_sheet = torch_sheet.convert_alpha()
+            except Exception:
+                pass
+            tw, th = int(32 * self.torch_scale), int(32 * self.torch_scale)
+            for i in range(4):
+                sub = torch_sheet.subsurface((i * 32, 0, 32, 32))
+                self.torch_frames.append(pygame.transform.scale(sub, (tw, th)))
+            self.loaded = True
+        except Exception as e:
+            print(f"[Renderer] Could not load Cold Corridors background assets: {e}")
+            self.loaded = False
+
+    def _precompute_glow(self):
+        max_r = 85
+        for step in range(8):
+            r_cur = max_r - step * 3
+            surf = pygame.Surface((r_cur * 2, r_cur * 2), pygame.SRCALPHA)
+            for r in range(r_cur, 0, -6):
+                ratio = (1.0 - r / r_cur)
+                alpha = int(45 * (ratio ** 1.3))
+                pygame.draw.circle(surf, (255, 145, 45, alpha), (r_cur, r_cur), r)
+            # Inner bright core
+            for r in range(int(r_cur * 0.35), 0, -3):
+                ratio = (1.0 - r / (r_cur * 0.35))
+                alpha = int(70 * ratio)
+                pygame.draw.circle(surf, (255, 210, 110, alpha), (r_cur, r_cur), r)
+            self.glow_surfaces.append(surf)
+
+    def _init_particles(self):
+        self.particles = []
+        for _ in range(25):
+            tx, ty = random.choice(self.torch_positions)
+            px = tx + random.uniform(-15, 15)
+            py = (ty - 45) + random.uniform(-10, 10)
+            life = random.randint(20, 90)
+            max_life = life
+            vy = random.uniform(-0.4, -0.9)
+            vx = random.uniform(-0.2, 0.2)
+            self.particles.append([px, py, vx, vy, life, max_life])
+
+    def draw(self, screen: pygame.Surface, anim_tick: int, now_ticks: int, arena_left: int, arena_right: int, ground_y: int):
+        if not self.loaded:
+            return
+
+        # 1. Base castle corridor panorama
+        screen.blit(self.bg_surface, (0, 0))
+
+        # 2. Gothic boundary columns at arena borders
+        pillar_w = 22
+        col_color_dark = (20, 16, 32)
+        col_color_mid = (40, 32, 60)
+        col_color_hi = (68, 56, 96)
+        for px in [arena_left - pillar_w, arena_right]:
+            pygame.draw.rect(screen, col_color_dark, (px, 140, pillar_w, ground_y - 140))
+            pygame.draw.rect(screen, col_color_mid, (px + 4, 150, pillar_w - 8, ground_y - 170))
+            pygame.draw.rect(screen, col_color_hi, (px, 140, pillar_w, 12))  # Capital
+            pygame.draw.rect(screen, col_color_hi, (px - 2, ground_y - 15, pillar_w + 4, 15))  # Plinth
+
+        # 3. Boundary ward barrier lines
+        ward_alpha = int(70 + 40 * math.sin(now_ticks * 0.003))
+        ward_surf = pygame.Surface((4, ground_y - 140), pygame.SRCALPHA)
+        ward_surf.fill((160, 60, 240, ward_alpha))
+        screen.blit(ward_surf, (arena_left - 2, 140))
+        screen.blit(ward_surf, (arena_right - 2, 140))
+
+        # 4. Animated sconce torches and volumetric glow
+        for idx, (tx, ty) in enumerate(self.torch_positions):
+            fx = tx
+            fy = ty - 45
+            # Pulsing radial glow
+            if self.glow_surfaces:
+                g_idx = (idx * 2 + int(now_ticks * 0.008)) % len(self.glow_surfaces)
+                g_surf = self.glow_surfaces[g_idx]
+                gw, gh = g_surf.get_size()
+                screen.blit(g_surf, (fx - gw // 2, fy - gh // 2), special_flags=pygame.BLEND_ADD)
+
+            # Sconce torch sprite
+            if self.torch_frames:
+                frame_idx = (anim_tick // 6 + idx) % len(self.torch_frames)
+                t_frame = self.torch_frames[frame_idx]
+                screen.blit(t_frame, (tx - t_frame.get_width() // 2, ty - t_frame.get_height()))
+
+        # 5. Floating castle embers
+        for p in self.particles:
+            p[0] += p[2] + math.sin(now_ticks * 0.004 + p[1]) * 0.15
+            p[1] += p[3]
+            p[4] -= 1
+            if p[4] <= 0:
+                tx, ty = random.choice(self.torch_positions)
+                p[0] = tx + random.uniform(-10, 10)
+                p[1] = ty - 45 + random.uniform(-5, 5)
+                p[4] = random.randint(40, 90)
+                p[5] = p[4]
+            ratio = p[4] / p[5]
+            c = (255, int(140 + 90 * ratio), 40)
+            pygame.draw.circle(screen, c, (int(p[0]), int(p[1])), 1 if ratio < 0.5 else 2)
+
+        # 6. Subtle floor ledge highlight
+        pygame.draw.line(screen, (58, 46, 88), (0, ground_y), (self.width, ground_y), 2)
+
+
 class Renderer:
     def __init__(self, width: int = 1280, height: int = 720):
         self.width = width
@@ -380,10 +530,11 @@ class Renderer:
         self.arena_right = self.arena_left + int(C.ARENA_W * self.scale)   # 1140 px
         self.ground_y = 540
 
-        # Sprite animators
+        # Sprite animators & Gothic Background
         self.boss_animator = NightBorneBossAnimator()
         self.hero_animator = HeroKnightAnimator()
         self.rebel_animator = PunkRebelAnimator()
+        self.corridor_bg = ColdCorridorsBackground(width=self.width, height=self.height, ground_y=self.ground_y)
         self.anim_tick = 0
         self.boss_death_timer = 0
         self.player_death_timer = 0
@@ -410,32 +561,35 @@ class Renderer:
             self.boss_death_timer = 0
 
         # -------------------------------------------------------------
-        # 1. Background (Moonlit gothic courtyard)
+        # 1. Background (Cold Corridors Gothic Castle Hall or Fallback)
         # -------------------------------------------------------------
-        self.screen.fill((12, 14, 24))
+        if getattr(self, "corridor_bg", None) and self.corridor_bg.loaded:
+            self.corridor_bg.draw(self.screen, self.anim_tick, now_ticks, self.arena_left, self.arena_right, self.ground_y)
+        else:
+            self.screen.fill((12, 14, 24))
 
-        # Distant moon
-        pygame.draw.circle(self.screen, (230, 235, 245), (1020, 130), 55)
-        pygame.draw.circle(self.screen, (12, 14, 24), (1050, 120), 50)  # crescent shadow
+            # Distant moon
+            pygame.draw.circle(self.screen, (230, 235, 245), (1020, 130), 55)
+            pygame.draw.circle(self.screen, (12, 14, 24), (1050, 120), 50)  # crescent shadow
 
-        # Gothic skyline silhouette
-        city_color = (20, 22, 38)
-        pygame.draw.rect(self.screen, city_color, (0, 360, self.width, 180))
-        for tx, tw, th in [(80, 70, 160), (220, 50, 110), (340, 90, 140), (860, 60, 130), (1080, 80, 170)]:
-            pygame.draw.rect(self.screen, city_color, (tx, 360 - th, tw, th))
-            pygame.draw.polygon(self.screen, city_color, [(tx, 360 - th), (tx + tw // 2, 360 - th - 40), (tx + tw, 360 - th)])
+            # Gothic skyline silhouette
+            city_color = (20, 22, 38)
+            pygame.draw.rect(self.screen, city_color, (0, 360, self.width, 180))
+            for tx, tw, th in [(80, 70, 160), (220, 50, 110), (340, 90, 140), (860, 60, 130), (1080, 80, 170)]:
+                pygame.draw.rect(self.screen, city_color, (tx, 360 - th, tw, th))
+                pygame.draw.polygon(self.screen, city_color, [(tx, 360 - th), (tx + tw // 2, 360 - th - 40), (tx + tw, 360 - th)])
 
-        # Floor
-        floor_rect = pygame.Rect(0, self.ground_y, self.width, self.height - self.ground_y)
-        pygame.draw.rect(self.screen, (32, 35, 48), floor_rect)
-        pygame.draw.line(self.screen, (60, 65, 85), (0, self.ground_y), (self.width, self.ground_y), 3)
+            # Floor
+            floor_rect = pygame.Rect(0, self.ground_y, self.width, self.height - self.ground_y)
+            pygame.draw.rect(self.screen, (32, 35, 48), floor_rect)
+            pygame.draw.line(self.screen, (60, 65, 85), (0, self.ground_y), (self.width, self.ground_y), 3)
 
-        # Arena boundary pillars
-        pillar_w = 20
-        pygame.draw.rect(self.screen, (55, 60, 80), (self.arena_left - pillar_w, 200, pillar_w, self.ground_y - 200))
-        pygame.draw.rect(self.screen, (55, 60, 80), (self.arena_right, 200, pillar_w, self.ground_y - 200))
-        pygame.draw.line(self.screen, (100, 110, 140), (self.arena_left, 200), (self.arena_left, self.ground_y), 2)
-        pygame.draw.line(self.screen, (100, 110, 140), (self.arena_right, 200), (self.arena_right, self.ground_y), 2)
+            # Arena boundary pillars
+            pillar_w = 20
+            pygame.draw.rect(self.screen, (55, 60, 80), (self.arena_left - pillar_w, 200, pillar_w, self.ground_y - 200))
+            pygame.draw.rect(self.screen, (55, 60, 80), (self.arena_right, 200, pillar_w, self.ground_y - 200))
+            pygame.draw.line(self.screen, (100, 110, 140), (self.arena_left, 200), (self.arena_left, self.ground_y), 2)
+            pygame.draw.line(self.screen, (100, 110, 140), (self.arena_right, 200), (self.arena_right, self.ground_y), 2)
 
         # -------------------------------------------------------------
         # 2. Hazards & Boss Ability Ground Telegraphs
