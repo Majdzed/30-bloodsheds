@@ -671,13 +671,6 @@ class Renderer:
                     # Light attack bullet tracer
                     target_x = self.arena_right if facing_boss > 0 else self.arena_left
                     pygame.draw.line(self.screen, (255, 230, 100), (psx, shot_y), (target_x, shot_y), 3)
-            else:
-                # Katana sword slash
-                range_u = env.weapon.light_range if p.pending_attack_id == 1 else env.weapon.heavy_range
-                slash_len = int(range_u * self.scale)
-                end_x = psx + facing_boss * slash_len
-                sword_color = (255, 240, 180) if p.pending_attack_id == 2 else (200, 230, 255)
-                pygame.draw.line(self.screen, sword_color, (psx, psy - ph // 2), (end_x, psy - ph // 2 - 10), 5)
 
         # Player Super visual
         if p.state == PlayerState.SUPER:
@@ -687,10 +680,8 @@ class Renderer:
                 pygame.draw.line(self.screen, (255, 80, 120), (0, beam_y), (self.width, beam_y), 28)
                 pygame.draw.line(self.screen, (255, 255, 255), (0, beam_y), (self.width, beam_y), 10)
             else:
-                # Blood Katana: triple crimson slash arc
-                slash_reach = int(200 * self.scale)
-                arc_x = psx if facing_boss > 0 else psx - slash_reach
-                pygame.draw.arc(self.screen, (255, 30, 60), pygame.Rect(arc_x, psy - ph - 20, slash_reach, ph + 40), 0, math.pi, 8)
+                # Blood Katana: cinematic blood awakening, crescent wave & dimensional slashes
+                self._draw_blood_katana(env, p, b, psx, psy, facing_boss, now_ticks)
 
         # -------------------------------------------------------------
         # 6. Full HUD Interface
@@ -917,6 +908,170 @@ class Renderer:
                 spk_x = strike_impact_x + random.randint(-int(strike_reach * 0.6), int(strike_reach * 0.6))
                 spk_y = bsy - random.randint(2, 25)
                 pygame.draw.circle(self.screen, (255, 255, 255), (spk_x, spk_y), random.randint(1, 3))
+
+    def _draw_blood_katana(self, env, p, b, psx: int, psy: int, facing_boss: int, now_ticks: int):
+        """Procedural cinematic VFX for Katana Super: Blood Katana."""
+        total_frames = max(1, C.sec(env.weapon.super_duration_s))
+        timer = getattr(p, "action_timer", 0)
+        progress = max(0.0, min(1.0, 1.0 - (timer / total_frames)))
+        reach_px = int(200.0 * self.scale)
+        ph = 74
+
+        # -------------------------------------------------------------
+        # 1. Screen Flash & Blood Red Atmosphere
+        # -------------------------------------------------------------
+        if progress < 0.15:
+            # Ignition flash: brief dark blood red pulse
+            alpha = int(45 * (1.0 - progress / 0.15))
+            flash = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            flash.fill((190, 20, 35, alpha))
+            self.screen.blit(flash, (0, 0))
+        elif 0.32 <= progress <= 0.48:
+            # Impact flash when crescent slash erupts
+            impact_p = (progress - 0.32) / 0.16
+            alpha = int(50 * (1.0 - impact_p))
+            flash = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            flash.fill((235, 30, 50, alpha))
+            self.screen.blit(flash, (0, 0))
+
+        # -------------------------------------------------------------
+        # 2. Hero Blood Aura & Ground Blood Pool
+        # -------------------------------------------------------------
+        # Swirling pulsing crimson aura
+        aura_r = int(44 + 8 * math.sin(now_ticks * 0.15))
+        aura_surf = pygame.Surface((aura_r * 2, aura_r * 2), pygame.SRCALPHA)
+        pygame.draw.circle(aura_surf, (160, 10, 35, 85), (aura_r, aura_r), aura_r)
+        pygame.draw.circle(aura_surf, (230, 25, 55, 130), (aura_r, aura_r), int(aura_r * 0.65))
+        pygame.draw.circle(aura_surf, (255, 190, 200, 170), (aura_r, aura_r), int(aura_r * 0.28))
+        self.screen.blit(aura_surf, (psx - aura_r, psy - ph // 2 - aura_r))
+
+        # Ground blood pool / ring under hero's feet
+        pool_w = int(55 + 25 * progress)
+        pool_surf = pygame.Surface((pool_w * 2, 22), pygame.SRCALPHA)
+        pygame.draw.ellipse(pool_surf, (150, 15, 35, 140), (0, 0, pool_w * 2, 22))
+        pygame.draw.ellipse(pool_surf, (245, 40, 70, 190), (8, 2, pool_w * 2 - 16, 18), 2)
+        self.screen.blit(pool_surf, (psx - pool_w, psy - 14))
+
+        # Blood energy tendrils spiraling inward toward sword hand during windup
+        if progress < 0.40:
+            for i in range(7):
+                angle = (now_ticks * 0.08 + i * (2.0 * math.pi / 7))
+                radius = int(52 * (1.0 - progress / 0.40)) + 14
+                tx = psx + int(math.cos(angle) * radius)
+                ty = (psy - ph // 2) + int(math.sin(angle) * radius * 0.8)
+                pygame.draw.circle(self.screen, (255, 60, 80), (tx, ty), 3)
+                pygame.draw.line(self.screen, (220, 20, 45), (tx, ty), (psx + facing_boss * 20, psy - ph // 2 - 10), 1)
+
+        # -------------------------------------------------------------
+        # 3. Cascading Crimson Crescent Blades
+        # -------------------------------------------------------------
+        if progress >= 0.20:
+            wave_travel = min(1.0, (progress - 0.20) / 0.70)
+            lead_x = psx + facing_boss * int(wave_travel * reach_px)
+            center_y = psy - ph // 2
+
+            # Two cascading crescent waves: lead wave and trailing secondary wave
+            wave_centers = [lead_x]
+            if wave_travel > 0.25:
+                trail_x = lead_x - facing_boss * int(40 * self.scale)
+                wave_centers.append(trail_x)
+
+            for w_idx, cx in enumerate(wave_centers):
+                scale_mult = 1.0 if w_idx == 0 else 0.8
+                for offset, r_outer, r_inner, color, alpha in [
+                    (-facing_boss * 16, int(82 * scale_mult), int(56 * scale_mult), (120, 10, 25), 90),   # Blood mist
+                    (0,                 int(76 * scale_mult), int(56 * scale_mult), (205, 20, 45), 180),  # Crimson energy
+                    (facing_boss * 8,   int(70 * scale_mult), int(56 * scale_mult), (255, 45, 75), 235),  # Scarlet blade
+                ]:
+                    cur_cx = cx + offset
+                    crescent_pts = []
+                    num_pts = 14
+                    for step in range(num_pts + 1):
+                        theta = -math.pi / 2.3 + (math.pi * 2 / 2.3) * (step / num_pts)
+                        px = cur_cx + facing_boss * int(math.cos(theta) * r_outer)
+                        py = center_y + int(math.sin(theta) * r_outer * 1.1)
+                        crescent_pts.append((px, py))
+                    for step in range(num_pts, -1, -1):
+                        theta = -math.pi / 2.3 + (math.pi * 2 / 2.3) * (step / num_pts)
+                        px = cur_cx + facing_boss * int(math.cos(theta) * r_inner)
+                        py = center_y + int(math.sin(theta) * r_inner * 1.1)
+                        crescent_pts.append((px, py))
+
+                    if len(crescent_pts) > 2:
+                        min_x = min(pt[0] for pt in crescent_pts)
+                        max_x = max(pt[0] for pt in crescent_pts)
+                        min_y = min(pt[1] for pt in crescent_pts)
+                        max_y = max(pt[1] for pt in crescent_pts)
+                        surf_w = max(1, max_x - min_x + 4)
+                        surf_h = max(1, max_y - min_y + 4)
+                        c_surf = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
+                        shifted_pts = [(pt[0] - min_x + 2, pt[1] - min_y + 2) for pt in crescent_pts]
+                        pygame.draw.polygon(c_surf, (*color, alpha), shifted_pts)
+                        self.screen.blit(c_surf, (min_x - 2, min_y - 2))
+
+                # Razor-sharp white-hot cutting core along the crest
+                r_crest = int(66 * scale_mult)
+                crest_pts = []
+                for step in range(12 + 1):
+                    theta = -math.pi / 2.3 + (math.pi * 2 / 2.3) * (step / 12)
+                    px = (cx + facing_boss * 8) + facing_boss * int(math.cos(theta) * r_crest)
+                    py = center_y + int(math.sin(theta) * r_crest * 1.1)
+                    crest_pts.append((px, py))
+                for i in range(len(crest_pts) - 1):
+                    pygame.draw.line(self.screen, (255, 235, 245), crest_pts[i], crest_pts[i + 1], 3)
+
+            # ---------------------------------------------------------
+            # 4. Dimensional Anime-style Cross Slashes
+            # ---------------------------------------------------------
+            if 0.32 <= progress <= 0.85:
+                cut_x = psx + facing_boss * int(reach_px * 0.65)
+                cut_y = psy - ph // 2
+                slash_span = int(95 * self.scale)
+
+                # Slash 1: Diagonal /
+                s1_start = (cut_x - facing_boss * slash_span // 2, cut_y - slash_span // 2)
+                s1_end   = (cut_x + facing_boss * slash_span // 2, cut_y + slash_span // 2)
+                pygame.draw.line(self.screen, (255, 30, 60), s1_start, s1_end, 7)
+                pygame.draw.line(self.screen, (255, 240, 245), s1_start, s1_end, 2)
+
+                # Slash 2: Reverse diagonal \
+                s2_start = (cut_x - facing_boss * slash_span // 2, cut_y + slash_span // 2)
+                s2_end   = (cut_x + facing_boss * slash_span // 2, cut_y - slash_span // 2)
+                pygame.draw.line(self.screen, (220, 20, 45), s2_start, s2_end, 6)
+                pygame.draw.line(self.screen, (255, 240, 245), s2_start, s2_end, 2)
+
+                # Central crimson impact flare
+                pygame.draw.circle(self.screen, (255, 245, 250), (cut_x, cut_y), 7)
+                pygame.draw.circle(self.screen, (255, 50, 80), (cut_x, cut_y), 15, 3)
+
+            # ---------------------------------------------------------
+            # 5. Ground Fissure & Erupting Blood Spikes
+            # ---------------------------------------------------------
+            step_dir = 12 if facing_boss > 0 else -12
+            curr_x = psx
+            while (curr_x < lead_x if facing_boss > 0 else curr_x > lead_x):
+                next_x = curr_x + step_dir
+                f_y1 = psy - random.randint(0, 3)
+                f_y2 = psy - random.randint(0, 3)
+                pygame.draw.line(self.screen, (255, 40, 60), (curr_x, f_y1), (next_x, f_y2), 3)
+                if random.random() < 0.35:
+                    spike_h = random.randint(12, 28)
+                    pygame.draw.polygon(
+                        self.screen,
+                        (230, 25, 45),
+                        [(curr_x - 3, psy), (curr_x, psy - spike_h), (curr_x + 3, psy)]
+                    )
+                curr_x = next_x
+
+            # ---------------------------------------------------------
+            # 6. Splattering Blood Droplets & Embers
+            # ---------------------------------------------------------
+            for _ in range(14):
+                bx = lead_x + facing_boss * random.randint(-40, 60)
+                by = center_y + random.randint(-60, 60)
+                b_size = random.randint(2, 4)
+                pygame.draw.circle(self.screen, (255, 30, 60), (bx, by), b_size)
+                pygame.draw.line(self.screen, (180, 15, 35), (bx, by), (bx - facing_boss * random.randint(5, 15), by + random.randint(2, 8)), 1)
 
     def close(self):
         pygame.quit()
