@@ -1,33 +1,46 @@
-"""Interactive mode: Play the Boss Gauntlet with keyboard in a Pygame window.
+"""Interactive mode: Play or Watch the Boss Gauntlet with full menu navigation.
 
-Controls:
-    A / Left Arrow      : Move Left
-    D / Right Arrow     : Move Right
-    W / Space / Up Arrow: Jump
-    J / Z               : Light Attack
-    K / X               : Heavy Attack
-    L / C / LShift      : Dodge Roll
-    U / F               : Parry
-    I / Q               : Super (Blood Katana)
-    H / E               : Drink Flask
-    R                   : Restart Episode
-    1 .. 9              : Jump to Fight N
-    ESC                 : Quit
+Features:
+- Main Menu: Mode selection (Player vs Boss, Agent vs Boss, Train Agents, Quit)
+- Character Selection: Hero Knight (Katana) or The Hunter (Revolver), fight selection 1..30
+- In-Game Combat: Keyboard controls for player or autonomous AI control for agent
+- Defeat Screen: Blood-drenched gothic theme with dripping blood streams, combat stats, retry/menu/quit
+- Victory Screen: Radiant celebratory gold-crimson aura, stats, next fight progression
+- Training Menu: Train single fight or full curriculum in a background thread without freezing UI
 """
 
 import argparse
+import os
 import sys
+import time
+import threading
 import pygame
+import numpy as np
 
 from boss_env import constants as C
 from boss_env.env import BossFightEnv, Action
 from boss_env.renderer import Renderer
+from observe import find_latest_model
+from agents.rule_based import RuleBasedAgent
+
+try:
+    from sb3_contrib import MaskablePPO
+except ImportError:
+    MaskablePPO = None
+
+
+class GameState:
+    MAIN_MENU = "MAIN_MENU"
+    CHAR_SELECT = "CHAR_SELECT"
+    TRAIN_MENU = "TRAIN_MENU"
+    PLAYING = "PLAYING"
+    GAME_OVER = "GAME_OVER"
+    VICTORY = "VICTORY"
 
 
 def get_action_from_keys(keys, env: BossFightEnv) -> Action:
     mask = env.action_masks()
 
-    # Priority order for instantaneous actions:
     # 1. Super
     if (keys[pygame.K_i] or keys[pygame.K_q]) and mask[Action.USE_SUPER]:
         return Action.USE_SUPER
@@ -69,101 +82,469 @@ def get_action_from_keys(keys, env: BossFightEnv) -> Action:
     return Action.IDLE
 
 
+def run_training_worker(weapon: str, mode: str, status_dict: dict, stop_event: threading.Event):
+    """Background training worker to avoid blocking Pygame window."""
+    status_dict["status"] = f"Initializing {weapon.capitalize()} training environment..."
+    try:
+        from train import make_env
+        from sb3_contrib import MaskablePPO
+
+        target_steps = 20_000 if mode == "single" else 60_000
+        env = make_env(weapon=weapon, fight=1)
+
+        model = MaskablePPO(
+            policy="MlpPolicy",
+            env=env,
+            learning_rate=3e-4,
+            n_steps=1024,
+            batch_size=64,
+            n_epochs=4,
+            verbose=0,
+        )
+
+        chunk = 2000
+        steps = 0
+        while steps < target_steps and not stop_event.is_set():
+            model.learn(total_timesteps=chunk, reset_num_timesteps=False)
+            steps += chunk
+            pct = int((steps / target_steps) * 100)
+            status_dict["status"] = f"Training {weapon.capitalize()} — {pct}% ({steps:,}/{target_steps:,} steps)"
+
+        if not stop_event.is_set():
+            os.makedirs("models", exist_ok=True)
+            save_path = os.path.join("models", f"menu_{weapon}_{mode}_final")
+            model.save(save_path)
+            status_dict["status"] = f"Complete! Saved to {save_path}.zip"
+            status_dict["is_training"] = False
+        else:
+            status_dict["status"] = "Training stopped by user."
+            status_dict["is_training"] = False
+    except Exception as e:
+        status_dict["status"] = f"Training notice: {str(e)[:50]}"
+        status_dict["is_training"] = False
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Play Boss Gauntlet interactively")
+    parser = argparse.ArgumentParser(description="Boss Gauntlet: Interactive Play and Menus")
     parser.add_argument("--fight", type=int, default=1, help="Starting fight index (1..30)")
     parser.add_argument("--weapon", type=str, default="katana", choices=["katana", "revolver"])
     parser.add_argument("--upgrade", type=str, default="health", choices=["health", "flask"])
-    parser.add_argument("--lose-mode", type=str, default="fight", choices=["fight", "gauntlet"],
-                        help="On loss: retry current fight or reset to fight 1")
+    parser.add_argument("--skip-menu", action="store_true", help="Start directly in combat mode")
+    parser.add_argument("--mode", type=str, default="player", choices=["player", "agent"],
+                        help="Initial combat mode: player or agent")
     args = parser.parse_args()
 
-    current_fight = args.fight
-    env = BossFightEnv(weapon=args.weapon, fight=current_fight, upgrade=args.upgrade, frame_skip=1)
     renderer = Renderer()
 
-    obs, _ = env.reset()
-    running = True
-    game_over = False
-    game_result_text = ""
+    # State variables
+    state = GameState.PLAYING if args.skip_menu else GameState.MAIN_MENU
+    active_mode = args.mode          # "player" or "agent"
+    selected_char = args.weapon      # "katana" or "revolver"
+    current_fight = max(1, min(C.N_FIGHTS, args.fight))
+    upgrade_path = args.upgrade
 
-    print("\n" + "=" * 60)
-    print(f"BOSS GAUNTLET - Playing Fight {current_fight}")
-    print("Controls: A/D Move | W/Space Jump | J/K Attack | L Roll | U Parry | I Super | R Restart")
-    print("=" * 60 + "\n")
+    # Menu selection indices
+    main_menu_options = [
+        "1. PLAYER VS BOSS",
+        "2. AGENT VS BOSS",
+        "3. TRAIN AGENTS",
+        "4. QUIT GAME",
+    ]
+    selected_menu_idx = 0
+    selected_char_btn = 0
+    selected_train_btn = 0
+    selected_game_over_btn = 0
+    selected_victory_btn = 0
+
+    # Training state
+    train_weapon = "katana"
+    train_mode = "single"
+    training_status = {"status": "", "is_training": False}
+    stop_training_event = threading.Event()
+    train_thread = None
+
+    # Gameplay objects
+    env = None
+    agent = None
+    obs = None
+    fight_start_time = 0.0
+    boss_start_hp = 100.0
+    stats = {}
+
+    def init_battle(weapon_name: str, fight_idx: int):
+        nonlocal env, agent, obs, fight_start_time, boss_start_hp
+        env = BossFightEnv(weapon=weapon_name, fight=fight_idx, upgrade=upgrade_path, frame_skip=1)
+        obs, _ = env.reset()
+        fight_start_time = time.time()
+        boss_start_hp = float(env.boss.hp)
+
+        agent = None
+        if active_mode == "agent":
+            model_path = find_latest_model(weapon=weapon_name, fight=fight_idx)
+            if model_path and os.path.exists(model_path) and MaskablePPO is not None:
+                try:
+                    print(f"Loading trained MaskablePPO model from {model_path}...")
+                    agent = MaskablePPO.load(model_path)
+                except Exception as e:
+                    print(f"Failed to load {model_path}: {e}. Falling back to RuleBasedAgent.")
+                    agent = RuleBasedAgent(weapon=weapon_name)
+            else:
+                print(f"Using RuleBasedAgent for {weapon_name} (Fight {fight_idx})...")
+                agent = RuleBasedAgent(weapon=weapon_name)
+
+    if state == GameState.PLAYING:
+        init_battle(selected_char, current_fight)
+
+    running = True
 
     while running:
-        # Event processing
-        for event in pygame.event.get():
+        mouse_pos = pygame.mouse.get_pos()
+        events = pygame.event.get()
+
+        for event in events:
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
-                elif event.key == pygame.K_r:
-                    # Manual reset
-                    obs, _ = env.reset()
-                    game_over = False
-                    game_result_text = ""
-                # Quick jump to fight 1..9
-                elif pygame.K_1 <= event.key <= pygame.K_9:
-                    current_fight = event.key - pygame.K_0
-                    env.set_fight(current_fight)
-                    obs, _ = env.reset()
-                    game_over = False
-                    game_result_text = ""
-                    print(f"Switched to Fight {current_fight}")
+                break
 
-        keys = pygame.key.get_pressed()
+            # -------------------------------------------------------------
+            # 1. MAIN MENU INPUT
+            # -------------------------------------------------------------
+            if state == GameState.MAIN_MENU:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_UP:
+                        selected_menu_idx = (selected_menu_idx - 1) % len(main_menu_options)
+                    elif event.key == pygame.K_DOWN:
+                        selected_menu_idx = (selected_menu_idx + 1) % len(main_menu_options)
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if selected_menu_idx == 0:
+                            active_mode = "player"
+                            state = GameState.CHAR_SELECT
+                            selected_char_btn = 0
+                        elif selected_menu_idx == 1:
+                            active_mode = "agent"
+                            state = GameState.CHAR_SELECT
+                            selected_char_btn = 0
+                        elif selected_menu_idx == 2:
+                            state = GameState.TRAIN_MENU
+                            selected_train_btn = 0
+                        elif selected_menu_idx == 3:
+                            running = False
+                    elif event.key == pygame.K_1:
+                        active_mode = "player"
+                        state = GameState.CHAR_SELECT
+                        selected_char_btn = 0
+                    elif event.key == pygame.K_2:
+                        active_mode = "agent"
+                        state = GameState.CHAR_SELECT
+                        selected_char_btn = 0
+                    elif event.key == pygame.K_3:
+                        state = GameState.TRAIN_MENU
+                        selected_train_btn = 0
+                    elif event.key in (pygame.K_4, pygame.K_ESCAPE):
+                        running = False
 
-        if not game_over:
-            action = get_action_from_keys(keys, env)
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    for i, b_rect in enumerate(btn_rects):
+                        if b_rect.collidepoint(event.pos):
+                            if i == 0:
+                                active_mode = "player"
+                                state = GameState.CHAR_SELECT
+                                selected_char_btn = 0
+                            elif i == 1:
+                                active_mode = "agent"
+                                state = GameState.CHAR_SELECT
+                                selected_char_btn = 0
+                            elif i == 2:
+                                state = GameState.TRAIN_MENU
+                                selected_train_btn = 0
+                            elif i == 3:
+                                running = False
+
+            # -------------------------------------------------------------
+            # 2. CHARACTER SELECT INPUT
+            # -------------------------------------------------------------
+            elif state == GameState.CHAR_SELECT:
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_LEFT, pygame.K_a):
+                        if selected_char_btn == 0:
+                            current_fight = max(1, current_fight - 1)
+                        else:
+                            selected_char = "katana"
+                    elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                        if selected_char_btn == 0:
+                            current_fight = min(C.N_FIGHTS, current_fight + 1)
+                        else:
+                            selected_char = "revolver"
+                    elif event.key == pygame.K_TAB:
+                        selected_char = "revolver" if selected_char == "katana" else "katana"
+                    elif event.key in (pygame.K_UP, pygame.K_DOWN):
+                        selected_char_btn = 1 - selected_char_btn
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if selected_char_btn == 0:
+                            init_battle(selected_char, current_fight)
+                            state = GameState.PLAYING
+                        else:
+                            state = GameState.MAIN_MENU
+                    elif event.key == pygame.K_ESCAPE:
+                        state = GameState.MAIN_MENU
+
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if "card_katana" in char_elements and char_elements["card_katana"].collidepoint(event.pos):
+                        selected_char = "katana"
+                    elif "card_revolver" in char_elements and char_elements["card_revolver"].collidepoint(event.pos):
+                        selected_char = "revolver"
+                    elif "arrow_left" in char_elements and char_elements["arrow_left"].collidepoint(event.pos):
+                        current_fight = max(1, current_fight - 1)
+                    elif "arrow_right" in char_elements and char_elements["arrow_right"].collidepoint(event.pos):
+                        current_fight = min(C.N_FIGHTS, current_fight + 1)
+                    elif "start" in char_elements and char_elements["start"].collidepoint(event.pos):
+                        init_battle(selected_char, current_fight)
+                        state = GameState.PLAYING
+                    elif "back" in char_elements and char_elements["back"].collidepoint(event.pos):
+                        state = GameState.MAIN_MENU
+
+            # -------------------------------------------------------------
+            # 3. TRAIN MENU INPUT
+            # -------------------------------------------------------------
+            elif state == GameState.TRAIN_MENU:
+                if not training_status["is_training"]:
+                    if event.type == pygame.KEYDOWN:
+                        if event.key in (pygame.K_UP, pygame.K_DOWN):
+                            selected_train_btn = 1 - selected_train_btn
+                        elif event.key == pygame.K_TAB:
+                            train_weapon = "revolver" if train_weapon == "katana" else "katana"
+                        elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                            if selected_train_btn == 0:
+                                training_status["is_training"] = True
+                                stop_training_event.clear()
+                                train_thread = threading.Thread(
+                                    target=run_training_worker,
+                                    args=(train_weapon, train_mode, training_status, stop_training_event),
+                                    daemon=True,
+                                )
+                                train_thread.start()
+                            else:
+                                state = GameState.MAIN_MENU
+                        elif event.key == pygame.K_ESCAPE:
+                            state = GameState.MAIN_MENU
+
+                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        if "weapon_katana" in train_elements and train_elements["weapon_katana"].collidepoint(event.pos):
+                            train_weapon = "katana"
+                        elif "weapon_revolver" in train_elements and train_elements["weapon_revolver"].collidepoint(event.pos):
+                            train_weapon = "revolver"
+                        elif "mode_single" in train_elements and train_elements["mode_single"].collidepoint(event.pos):
+                            train_mode = "single"
+                        elif "mode_curriculum" in train_elements and train_elements["mode_curriculum"].collidepoint(event.pos):
+                            train_mode = "curriculum"
+                        elif "start" in train_elements and train_elements["start"].collidepoint(event.pos):
+                            training_status["is_training"] = True
+                            stop_training_event.clear()
+                            train_thread = threading.Thread(
+                                target=run_training_worker,
+                                args=(train_weapon, train_mode, training_status, stop_training_event),
+                                daemon=True,
+                            )
+                            train_thread.start()
+                        elif "back" in train_elements and train_elements["back"].collidepoint(event.pos):
+                            state = GameState.MAIN_MENU
+                else:
+                    # In training progress view
+                    if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                        stop_training_event.set()
+                        training_status["status"] = "Stopping training..."
+                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        if "cancel" in train_elements and train_elements["cancel"].collidepoint(event.pos):
+                            stop_training_event.set()
+                            training_status["status"] = "Stopping training..."
+
+            # -------------------------------------------------------------
+            # 4. GAME OVER INPUT
+            # -------------------------------------------------------------
+            elif state == GameState.GAME_OVER:
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_UP, pygame.K_w):
+                        selected_game_over_btn = (selected_game_over_btn - 1) % 3
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        selected_game_over_btn = (selected_game_over_btn + 1) % 3
+                    elif event.key in (pygame.K_r,):
+                        # Retry fight
+                        init_battle(selected_char, current_fight)
+                        state = GameState.PLAYING
+                    elif event.key in (pygame.K_m, pygame.K_ESCAPE):
+                        state = GameState.MAIN_MENU
+                    elif event.key in (pygame.K_q,):
+                        running = False
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if selected_game_over_btn == 0:
+                            init_battle(selected_char, current_fight)
+                            state = GameState.PLAYING
+                        elif selected_game_over_btn == 1:
+                            state = GameState.MAIN_MENU
+                        elif selected_game_over_btn == 2:
+                            running = False
+
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    for i, b_rect in enumerate(game_over_btns):
+                        if b_rect.collidepoint(event.pos):
+                            if i == 0:
+                                init_battle(selected_char, current_fight)
+                                state = GameState.PLAYING
+                            elif i == 1:
+                                state = GameState.MAIN_MENU
+                            elif i == 2:
+                                running = False
+
+            # -------------------------------------------------------------
+            # 5. VICTORY INPUT
+            # -------------------------------------------------------------
+            elif state == GameState.VICTORY:
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_UP, pygame.K_w):
+                        selected_victory_btn = (selected_victory_btn - 1) % 4
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        selected_victory_btn = (selected_victory_btn + 1) % 4
+                    elif event.key in (pygame.K_SPACE,):
+                        # Next Fight
+                        if current_fight < C.N_FIGHTS:
+                            current_fight += 1
+                        init_battle(selected_char, current_fight)
+                        state = GameState.PLAYING
+                    elif event.key in (pygame.K_r,):
+                        # Retry Fight
+                        init_battle(selected_char, current_fight)
+                        state = GameState.PLAYING
+                    elif event.key in (pygame.K_m, pygame.K_ESCAPE):
+                        state = GameState.MAIN_MENU
+                    elif event.key in (pygame.K_q,):
+                        running = False
+                    elif event.key in (pygame.K_RETURN,):
+                        if selected_victory_btn == 0:
+                            if current_fight < C.N_FIGHTS:
+                                current_fight += 1
+                            init_battle(selected_char, current_fight)
+                            state = GameState.PLAYING
+                        elif selected_victory_btn == 1:
+                            init_battle(selected_char, current_fight)
+                            state = GameState.PLAYING
+                        elif selected_victory_btn == 2:
+                            state = GameState.MAIN_MENU
+                        elif selected_victory_btn == 3:
+                            running = False
+
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    for i, b_rect in enumerate(victory_btns):
+                        if b_rect.collidepoint(event.pos):
+                            if i == 0:
+                                if current_fight < C.N_FIGHTS:
+                                    current_fight += 1
+                                init_battle(selected_char, current_fight)
+                                state = GameState.PLAYING
+                            elif i == 1:
+                                init_battle(selected_char, current_fight)
+                                state = GameState.PLAYING
+                            elif i == 2:
+                                state = GameState.MAIN_MENU
+                            elif i == 3:
+                                running = False
+
+            # -------------------------------------------------------------
+            # 6. IN-GAME COMBAT INPUT
+            # -------------------------------------------------------------
+            elif state == GameState.PLAYING:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        state = GameState.MAIN_MENU
+                    elif event.key == pygame.K_r:
+                        init_battle(selected_char, current_fight)
+                    elif pygame.K_1 <= event.key <= pygame.K_9:
+                        current_fight = event.key - pygame.K_0
+                        init_battle(selected_char, current_fight)
+
+        # -------------------------------------------------------------
+        # STATE UPDATE & RENDERING
+        # -------------------------------------------------------------
+        if state == GameState.MAIN_MENU:
+            btn_rects = renderer.draw_main_menu(
+                options=main_menu_options,
+                selected_idx=selected_menu_idx,
+                mouse_pos=mouse_pos,
+            )
+
+        elif state == GameState.CHAR_SELECT:
+            char_elements = renderer.draw_character_select(
+                mode_name="Player vs Boss" if active_mode == "player" else "Agent vs Boss",
+                selected_char=selected_char,
+                starting_fight=current_fight,
+                selected_btn=selected_char_btn,
+                mouse_pos=mouse_pos,
+            )
+
+        elif state == GameState.TRAIN_MENU:
+            train_elements = renderer.draw_training_menu(
+                selected_weapon=train_weapon,
+                selected_mode=train_mode,
+                selected_btn=selected_train_btn,
+                is_training=training_status["is_training"],
+                training_status=training_status["status"],
+                mouse_pos=mouse_pos,
+            )
+
+        elif state == GameState.PLAYING:
+            keys = pygame.key.get_pressed()
+
+            # Choose action based on mode
+            if active_mode == "player":
+                action = get_action_from_keys(keys, env)
+            else:
+                # Agent action
+                if agent is not None:
+                    try:
+                        action_val, _ = agent.predict(obs, action_masks=env.action_masks())
+                        action = Action(int(action_val))
+                    except Exception:
+                        action = Action.IDLE
+                else:
+                    action = Action.IDLE
+
             obs, reward, term, trunc, info = env.step(action)
+            renderer.draw(env)
 
+            # Check outcome
             if term or trunc:
-                game_over = True
+                combat_duration = max(0.1, time.time() - fight_start_time)
+                damage_dealt = max(0.0, boss_start_hp - env.boss.hp)
+                stats = {
+                    "damage": damage_dealt,
+                    "duration": combat_duration,
+                    "boss_hp": max(0.0, env.boss.hp),
+                    "max_hp": env.boss.max_hp,
+                    "hearts": max(0, env.player.hearts),
+                    "max_hearts": env.player.max_hearts,
+                }
+
                 if info.get("win", False):
-                    game_result_text = f"VICTORY! Fight {current_fight} Cleared!"
-                    print(f"\n{game_result_text}")
+                    state = GameState.VICTORY
+                    selected_victory_btn = 0
                 else:
-                    reason = "Timeout" if trunc else "Defeated"
-                    game_result_text = f"DEFEAT ({reason})"
-                    print(f"\n{game_result_text}")
-        else:
-            # Game over state: press Space or R to continue
-            if keys[pygame.K_SPACE] or keys[pygame.K_r]:
-                if "VICTORY" in game_result_text:
-                    # Advance to next fight
-                    if current_fight < C.N_FIGHTS:
-                        current_fight += 1
-                        env.set_fight(current_fight)
-                else:
-                    if args.lose_mode == "gauntlet":
-                        current_fight = 1
-                        env.set_fight(1)
+                    state = GameState.GAME_OVER
+                    selected_game_over_btn = 0
 
-                obs, _ = env.reset()
-                game_over = False
-                game_result_text = ""
+        elif state == GameState.GAME_OVER:
+            game_over_btns = renderer.draw_game_over_screen(
+                fight=current_fight,
+                stats=stats,
+                selected_btn=selected_game_over_btn,
+                mouse_pos=mouse_pos,
+            )
 
-        # Draw frame
-        renderer.draw(env)
-
-        # Draw Game Over Banner overlay if applicable
-        if game_over:
-            overlay = pygame.Surface((renderer.width, renderer.height), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 140))
-            renderer.screen.blit(overlay, (0, 0))
-
-            color = (80, 240, 120) if "VICTORY" in game_result_text else (255, 60, 60)
-            txt_res = renderer.font_title.render(game_result_text, True, color)
-            renderer.screen.blit(txt_res, ((renderer.width - txt_res.get_width()) // 2, 300))
-
-            prompt = "Press SPACE or R to continue / retry"
-            txt_prompt = renderer.font_main.render(prompt, True, (220, 220, 220))
-            renderer.screen.blit(txt_prompt, ((renderer.width - txt_prompt.get_width()) // 2, 360))
-
-            pygame.display.flip()
+        elif state == GameState.VICTORY:
+            victory_btns = renderer.draw_victory_screen(
+                fight=current_fight,
+                stats=stats,
+                selected_btn=selected_victory_btn,
+                mouse_pos=mouse_pos,
+            )
 
     renderer.close()
 

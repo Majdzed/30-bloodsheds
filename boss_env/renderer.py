@@ -546,6 +546,9 @@ class Renderer:
         self.font_small = pygame.font.SysFont("arial", 14)
         self.font_hud = pygame.font.SysFont("consolas", 16, bold=True)
         self.font_undertale = pygame.font.SysFont("consolas", 20, bold=True)
+        self.font_huge = pygame.font.SysFont("georgia", 48, bold=True)
+        self.font_subtitle = pygame.font.SysFont("georgia", 22, bold=True)
+        self.font_btn = pygame.font.SysFont("arial", 19, bold=True)
 
         # Arena mapping
         self.scale = 1.25  # 800 * 1.25 = 1000 px
@@ -563,6 +566,16 @@ class Renderer:
         self.boss_death_timer = 0
         self.player_death_timer = 0
         self._prev_player_x = 150.0
+
+        # Dynamic UI particle pools (blood drips and victory embers)
+        self.blood_drips = [
+            {"x": x, "len": random.randint(35, 120), "speed": random.uniform(0.6, 2.0), "rad": random.randint(3, 6)}
+            for x in range(80, self.width - 80, 45)
+        ]
+        self.victory_embers = [
+            {"x": random.randint(80, self.width - 80), "y": random.randint(200, 700), "speed": random.uniform(1.0, 2.5), "rad": random.randint(2, 5)}
+            for _ in range(40)
+        ]
 
     def world_to_screen(self, x: float, y: float = 0.0):
         sx = int(self.arena_left + x * self.scale)
@@ -1658,6 +1671,437 @@ class Renderer:
                 spk_x = bsx + random.randint(-25, 25)
                 spk_y = shot_y + random.randint(-25, 25)
                 pygame.draw.circle(self.screen, (255, 200, 100), (spk_x, spk_y), random.randint(1, 3))
+
+    def draw_menu_bg(self, dim_alpha: int = 165):
+        """Draws animated gothic Cold Corridors background with soft dark overlay for menus."""
+        now_ticks = pygame.time.get_ticks()
+        if getattr(self, "corridor_bg", None) and self.corridor_bg.loaded:
+            self.corridor_bg.draw(self.screen, self.anim_tick, now_ticks, self.arena_left, self.arena_right, self.ground_y)
+        else:
+            self.screen.fill((14, 12, 22))
+
+        dim_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        dim_surf.fill((10, 8, 16, dim_alpha))
+        self.screen.blit(dim_surf, (0, 0))
+
+    def _draw_button(self, rect: pygame.Rect, text: str, is_hovered: bool, accent_color=(235, 45, 60), bg_color=(24, 18, 30)):
+        if is_hovered:
+            fill_col = (accent_color[0] // 5 + 24, accent_color[1] // 5 + 18, accent_color[2] // 5 + 28)
+            border_col = accent_color
+            border_w = 2
+            label_text = f"►  {text}  ◄"
+            text_col = (255, 255, 255)
+        else:
+            fill_col = bg_color
+            border_col = (70, 60, 85)
+            border_w = 1
+            label_text = text
+            text_col = (210, 205, 220)
+
+        pygame.draw.rect(self.screen, fill_col, rect, border_radius=6)
+        pygame.draw.rect(self.screen, border_col, rect, width=border_w, border_radius=6)
+
+        txt_surf = self.font_btn.render(label_text, True, text_col)
+        self.screen.blit(txt_surf, (rect.centerx - txt_surf.get_width() // 2, rect.centery - txt_surf.get_height() // 2))
+
+    def draw_main_menu(self, options: list, selected_idx: int, mouse_pos: tuple):
+        """Draws the main title menu screen."""
+        self.anim_tick += 1
+        self.draw_menu_bg(dim_alpha=165)
+
+        cx = self.width // 2
+
+        # Title
+        shadow = self.font_huge.render("BOSS GAUNTLET", True, (0, 0, 0))
+        self.screen.blit(shadow, (cx - shadow.get_width() // 2 + 3, 93))
+        title = self.font_huge.render("BOSS GAUNTLET", True, (255, 215, 60))
+        self.screen.blit(title, (cx - title.get_width() // 2, 90))
+
+        sub_red = self.font_subtitle.render("30   B L O O D S H E D S", True, (240, 45, 60))
+        self.screen.blit(sub_red, (cx - sub_red.get_width() // 2, 160))
+
+        desc = self.font_small.render("A Gothic Reinforcement Learning Arena", True, (165, 170, 190))
+        self.screen.blit(desc, (cx - desc.get_width() // 2, 200))
+
+        # Menu Options
+        btn_w, btn_h = 360, 52
+        btn_start_y = 260
+        btn_rects = []
+        for i, opt in enumerate(options):
+            b_rect = pygame.Rect(cx - btn_w // 2, btn_start_y + i * 72, btn_w, btn_h)
+            btn_rects.append(b_rect)
+            is_hover = (i == selected_idx) or b_rect.collidepoint(mouse_pos)
+            accent = (255, 50, 70) if "PLAYER" in opt else ((80, 210, 255) if "AGENT" in opt else ((255, 200, 50) if "TRAIN" in opt else (130, 130, 150)))
+            self._draw_button(b_rect, opt, is_hover, accent_color=accent)
+
+        # Footer
+        footer = self.font_small.render("UP/DOWN: Navigate  |  ENTER: Select  |  MOUSE: Click  |  ESC: Exit", True, (120, 125, 145))
+        self.screen.blit(footer, (cx - footer.get_width() // 2, self.height - 40))
+
+        pygame.display.flip()
+        self.clock.tick(60)
+        return btn_rects
+
+    def draw_character_select(self, mode_name: str, selected_char: str, starting_fight: int, selected_btn: int, mouse_pos: tuple):
+        """Draws the character selection screen with animated warrior previews."""
+        self.anim_tick += 1
+        self.draw_menu_bg(dim_alpha=175)
+
+        cx = self.width // 2
+
+        # Header
+        mode_badge = self.font_hud.render(f"MODE: {mode_name.upper()}", True, (255, 215, 60))
+        self.screen.blit(mode_badge, (cx - mode_badge.get_width() // 2, 35))
+
+        title = self.font_title.render("CHOOSE YOUR WARRIOR", True, (245, 240, 250))
+        self.screen.blit(title, (cx - title.get_width() // 2, 65))
+
+        # Two Character Cards
+        card_w, card_h = 440, 370
+        card_y = 115
+
+        # Card 1: Hero Knight (Katana)
+        c1_rect = pygame.Rect(cx - card_w - 25, card_y, card_w, card_h)
+        is_c1_selected = (selected_char == "katana")
+        is_c1_hover = c1_rect.collidepoint(mouse_pos)
+        c1_bg = (35, 16, 22) if is_c1_selected else ((28, 16, 20) if is_c1_hover else (18, 14, 22))
+        c1_border = (255, 60, 80) if is_c1_selected else ((180, 50, 65) if is_c1_hover else (65, 45, 60))
+        c1_bw = 3 if is_c1_selected else 1
+
+        pygame.draw.rect(self.screen, c1_bg, c1_rect, border_radius=8)
+        pygame.draw.rect(self.screen, c1_border, c1_rect, width=c1_bw, border_radius=8)
+
+        # Hero Knight Preview Sprite
+        if self.hero_animator.loaded and "idle" in self.hero_animator.animations:
+            hk_frames = self.hero_animator.animations["idle"]
+            hk_frame = hk_frames[(self.anim_tick // 6) % len(hk_frames)]
+            self.screen.blit(hk_frame, (c1_rect.centerx - hk_frame.get_width() // 2, c1_rect.y + 15))
+
+        # Hero Knight Info
+        t_c1 = self.font_subtitle.render("HERO KNIGHT", True, (255, 220, 230))
+        self.screen.blit(t_c1, (c1_rect.centerx - t_c1.get_width() // 2, c1_rect.y + 185))
+        t_sub1 = self.font_small.render("Weapon: Blood Katana", True, (240, 90, 110))
+        self.screen.blit(t_sub1, (c1_rect.centerx - t_sub1.get_width() // 2, c1_rect.y + 215))
+
+        lore1 = [
+            "• Playstyle: Lethal Close-Quarters Blade",
+            "• Light & Heavy Slashes with Blood Katana",
+            "• High-Damage Counterattack on Parry",
+            "• Super: Dimensional Blood Cross-Slashes",
+        ]
+        for li, l_txt in enumerate(lore1):
+            t_l = self.font_small.render(l_txt, True, (195, 185, 205))
+            self.screen.blit(t_l, (c1_rect.x + 25, c1_rect.y + 245 + li * 24))
+
+        # Card 2: The Hunter (Revolver / Rifle)
+        c2_rect = pygame.Rect(cx + 25, card_y, card_w, card_h)
+        is_c2_selected = (selected_char == "revolver")
+        is_c2_hover = c2_rect.collidepoint(mouse_pos)
+        c2_bg = (16, 26, 35) if is_c2_selected else ((18, 24, 30) if is_c2_hover else (18, 14, 22))
+        c2_border = (80, 220, 255) if is_c2_selected else ((60, 160, 190) if is_c2_hover else (45, 55, 65))
+        c2_bw = 3 if is_c2_selected else 1
+
+        pygame.draw.rect(self.screen, c2_bg, c2_rect, border_radius=8)
+        pygame.draw.rect(self.screen, c2_border, c2_rect, width=c2_bw, border_radius=8)
+
+        # Hunter Preview Sprite
+        if self.hunter_animator.loaded and self.hunter_animator.idle_frames:
+            h_frames = self.hunter_animator.idle_frames
+            h_frame = h_frames[(self.anim_tick // 8) % len(h_frames)]
+            self.screen.blit(h_frame, (c2_rect.centerx - h_frame.get_width() // 2, c2_rect.y + 60))
+
+        # Hunter Info
+        t_c2 = self.font_subtitle.render("THE HUNTER", True, (215, 240, 255))
+        self.screen.blit(t_c2, (c2_rect.centerx - t_c2.get_width() // 2, c2_rect.y + 185))
+        t_sub2 = self.font_small.render("Weapon: 6-Round Heavy Rifle", True, (80, 220, 255))
+        self.screen.blit(t_sub2, (c2_rect.centerx - t_sub2.get_width() // 2, c2_rect.y + 215))
+
+        lore2 = [
+            "• Playstyle: Tactical High-Velocity Ranged",
+            "• 6-Round Magazine with Strategic Reload",
+            "• Piercing Heavy Shot Destroys Heal Orbs",
+            "• Super: Searing Crimson Red Blast Beam",
+        ]
+        for li, l_txt in enumerate(lore2):
+            t_l = self.font_small.render(l_txt, True, (185, 195, 215))
+            self.screen.blit(t_l, (c2_rect.x + 25, c2_rect.y + 245 + li * 24))
+
+        # Fight Selector
+        fight_y = 515
+        left_arrow_rect = pygame.Rect(cx - 180, fight_y, 40, 36)
+        right_arrow_rect = pygame.Rect(cx + 140, fight_y, 40, 36)
+
+        pygame.draw.rect(self.screen, (28, 22, 35), left_arrow_rect, border_radius=4)
+        pygame.draw.rect(self.screen, (100, 90, 120), left_arrow_rect, width=1, border_radius=4)
+        t_la = self.font_main.render("◄", True, (255, 215, 60))
+        self.screen.blit(t_la, (left_arrow_rect.centerx - t_la.get_width() // 2, left_arrow_rect.centery - t_la.get_height() // 2))
+
+        pygame.draw.rect(self.screen, (28, 22, 35), right_arrow_rect, border_radius=4)
+        pygame.draw.rect(self.screen, (100, 90, 120), right_arrow_rect, width=1, border_radius=4)
+        t_ra = self.font_main.render("►", True, (255, 215, 60))
+        self.screen.blit(t_ra, (right_arrow_rect.centerx - t_ra.get_width() // 2, right_arrow_rect.centery - t_ra.get_height() // 2))
+
+        t_fn = self.font_subtitle.render(f"STARTING FIGHT:  {starting_fight}  /  30", True, (255, 225, 120))
+        self.screen.blit(t_fn, (cx - t_fn.get_width() // 2, fight_y + 4))
+
+        # Action Buttons
+        start_btn = pygame.Rect(cx - 240, 580, 220, 50)
+        back_btn = pygame.Rect(cx + 20, 580, 220, 50)
+
+        is_start_hover = (selected_btn == 0) or start_btn.collidepoint(mouse_pos)
+        is_back_hover = (selected_btn == 1) or back_btn.collidepoint(mouse_pos)
+
+        self._draw_button(start_btn, "START BATTLE", is_start_hover, accent_color=(255, 60, 80))
+        self._draw_button(back_btn, "BACK TO MENU", is_back_hover, accent_color=(120, 120, 150))
+
+        pygame.display.flip()
+        self.clock.tick(60)
+
+        return {
+            "card_katana": c1_rect,
+            "card_revolver": c2_rect,
+            "arrow_left": left_arrow_rect,
+            "arrow_right": right_arrow_rect,
+            "start": start_btn,
+            "back": back_btn,
+        }
+
+    def draw_training_menu(self, selected_weapon: str, selected_mode: str, selected_btn: int, is_training: bool, training_status: str, mouse_pos: tuple):
+        """Draws the reinforcement learning training interface."""
+        self.anim_tick += 1
+        now_ticks = pygame.time.get_ticks()
+
+        self.draw_menu_bg(dim_alpha=180)
+
+        cx = self.width // 2
+
+        title = self.font_title.render("TRAIN REINFORCEMENT LEARNING AGENTS", True, (255, 215, 60))
+        self.screen.blit(title, (cx - title.get_width() // 2, 70))
+
+        sub = self.font_main.render("Train a MaskablePPO Neural Network to Master the Gauntlet", True, (190, 195, 215))
+        self.screen.blit(sub, (cx - sub.get_width() // 2, 115))
+
+        # Panel Rect
+        panel = pygame.Rect(cx - 360, 160, 720, 440)
+        p_surf = pygame.Surface((720, 440), pygame.SRCALPHA)
+        p_surf.fill((20, 16, 28, 220))
+        self.screen.blit(p_surf, panel.topleft)
+        pygame.draw.rect(self.screen, (90, 75, 110), panel, width=2, border_radius=8)
+
+        if not is_training:
+            # 1. Weapon Selection Row
+            t_w = self.font_subtitle.render("1. Select Weapon to Train:", True, (240, 235, 245))
+            self.screen.blit(t_w, (panel.x + 50, panel.y + 40))
+
+            w1_rect = pygame.Rect(panel.x + 50, panel.y + 80, 280, 45)
+            w2_rect = pygame.Rect(panel.x + 360, panel.y + 80, 280, 45)
+
+            is_w1 = (selected_weapon == "katana")
+            is_w2 = (selected_weapon == "revolver")
+            self._draw_button(w1_rect, "Hero Knight (Katana)", is_w1, accent_color=(255, 65, 85))
+            self._draw_button(w2_rect, "The Hunter (Revolver)", is_w2, accent_color=(80, 220, 255))
+
+            # 2. Mode Selection Row
+            t_m = self.font_subtitle.render("2. Select Training Curriculum:", True, (240, 235, 245))
+            self.screen.blit(t_m, (panel.x + 50, panel.y + 155))
+
+            m1_rect = pygame.Rect(panel.x + 50, panel.y + 195, 280, 50)
+            m2_rect = pygame.Rect(panel.x + 360, panel.y + 195, 280, 50)
+
+            is_m1 = (selected_mode == "single")
+            is_m2 = (selected_mode == "curriculum")
+            self._draw_button(m1_rect, "Quick Fight (20k Steps)", is_m1, accent_color=(255, 200, 60))
+            self._draw_button(m2_rect, "Full Gauntlet (8 Stages)", is_m2, accent_color=(255, 200, 60))
+
+            desc_m = "Trains on Fight 1 to learn core combat." if is_m1 else "Progresses across ability milestones: F1, F4, F8, F12, F16, F21, F26, F30."
+            t_dm = self.font_small.render(desc_m, True, (180, 180, 205))
+            self.screen.blit(t_dm, (panel.x + 50, panel.y + 260))
+
+            # Action Buttons
+            start_train_btn = pygame.Rect(cx - 220, panel.y + 340, 200, 50)
+            back_btn = pygame.Rect(cx + 20, panel.y + 340, 200, 50)
+
+            is_st_hover = (selected_btn == 0) or start_train_btn.collidepoint(mouse_pos)
+            is_bk_hover = (selected_btn == 1) or back_btn.collidepoint(mouse_pos)
+
+            self._draw_button(start_train_btn, "START TRAINING", is_st_hover, accent_color=(80, 230, 120))
+            self._draw_button(back_btn, "BACK TO MENU", is_bk_hover, accent_color=(120, 120, 140))
+
+            pygame.display.flip()
+            self.clock.tick(60)
+
+            return {
+                "weapon_katana": w1_rect,
+                "weapon_revolver": w2_rect,
+                "mode_single": m1_rect,
+                "mode_curriculum": m2_rect,
+                "start": start_train_btn,
+                "back": back_btn,
+            }
+        else:
+            # Training In Progress View
+            t_ip = self.font_huge.render("TRAINING IN PROGRESS", True, (255, 215, 60))
+            self.screen.blit(t_ip, (cx - t_ip.get_width() // 2, panel.y + 70))
+
+            spinner_angle = now_ticks * 0.005
+            sp_cx, sp_cy = cx, panel.y + 190
+            for sp_i in range(8):
+                ang = spinner_angle + sp_i * (math.pi / 4)
+                sp_x = sp_cx + int(math.cos(ang) * 35)
+                sp_y = sp_cy + int(math.sin(ang) * 35)
+                alpha = int(255 * (sp_i / 8.0))
+                pygame.draw.circle(self.screen, (255, 60 + alpha // 2, 70), (sp_x, sp_y), 5)
+
+            t_stat = self.font_main.render(training_status or "Optimizing Neural Network Policy...", True, (230, 230, 245))
+            self.screen.blit(t_stat, (cx - t_stat.get_width() // 2, panel.y + 270))
+
+            t_note = self.font_small.render("Training is running. Model will be saved to models/", True, (160, 165, 185))
+            self.screen.blit(t_note, (cx - t_note.get_width() // 2, panel.y + 320))
+
+            stop_btn = pygame.Rect(cx - 100, panel.y + 365, 200, 42)
+            self._draw_button(stop_btn, "CANCEL", stop_btn.collidepoint(mouse_pos), accent_color=(220, 60, 70))
+
+            pygame.display.flip()
+            self.clock.tick(60)
+
+            return {"cancel": stop_btn}
+
+    def draw_game_over_screen(self, fight: int, stats: dict, selected_btn: int, mouse_pos: tuple):
+        """Draws the dark blood-soaked defeat screen with animated dripping blood streams and options."""
+        now_ticks = pygame.time.get_ticks()
+        self.anim_tick += 1
+
+        self.draw_menu_bg(dim_alpha=190)
+
+        # 1. Dark crimson border vignette
+        vig_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        for r_step in range(12):
+            val = int((12 - r_step) * 14)
+            pygame.draw.rect(vig_surf, (140, 5, 15, val), (r_step * 14, r_step * 10, self.width - r_step * 28, self.height - r_step * 20), width=15)
+        self.screen.blit(vig_surf, (0, 0))
+
+        # 2. Animated dripping blood streams
+        for drip in self.blood_drips:
+            drip["len"] += drip["speed"] * 0.4
+            if drip["len"] > random.randint(180, 280):
+                drip["len"] = random.randint(20, 50)
+            cur_l = int(drip["len"])
+            x = drip["x"]
+            rad = drip["rad"]
+            pygame.draw.line(self.screen, (160, 10, 20), (x, 0), (x, cur_l), rad * 2)
+            pygame.draw.circle(self.screen, (190, 15, 25), (x, cur_l), rad + 2)
+            pygame.draw.circle(self.screen, (240, 45, 55), (x - 1, cur_l - 1), rad // 2 + 1)
+
+        # 3. Blood splatter around title
+        for ox, oy, sr in [(-180, -20, 6), (-120, 15, 4), (160, -10, 7), (210, 25, 5), (-40, 35, 4), (90, -30, 5)]:
+            pygame.draw.circle(self.screen, (175, 12, 22), (self.width // 2 + ox, 150 + oy), sr)
+
+        # 4. Large dripping blood title: YOU DIED
+        shadow = self.font_huge.render("YOU DIED", True, (0, 0, 0))
+        self.screen.blit(shadow, (self.width // 2 - shadow.get_width() // 2 + 3, 133))
+        title = self.font_huge.render("YOU DIED", True, (225, 20, 35))
+        self.screen.blit(title, (self.width // 2 - title.get_width() // 2, 130))
+
+        sub_text = f"SLAIN IN FIGHT {fight} OF 30 BLOODSHEDS"
+        txt_sub = self.font_subtitle.render(sub_text, True, (215, 120, 130))
+        self.screen.blit(txt_sub, (self.width // 2 - txt_sub.get_width() // 2, 205))
+
+        # 5. Combat Stats Box
+        stats_rect = pygame.Rect(self.width // 2 - 240, 260, 480, 130)
+        s_surf = pygame.Surface((480, 130), pygame.SRCALPHA)
+        s_surf.fill((25, 10, 15, 210))
+        self.screen.blit(s_surf, stats_rect.topleft)
+        pygame.draw.rect(self.screen, (140, 25, 35), stats_rect, width=2, border_radius=6)
+
+        stat_lines = [
+            f"Damage Dealt: {stats.get('damage', 0):.0f}",
+            f"Survival Time: {stats.get('duration', 0):.1f}s",
+            f"Boss Remaining HP: {stats.get('boss_hp', 0):.0f} / {stats.get('max_hp', 0):.0f}",
+        ]
+        for idx, line in enumerate(stat_lines):
+            t_s = self.font_main.render(line, True, (230, 215, 220))
+            self.screen.blit(t_s, (stats_rect.x + 30, stats_rect.y + 20 + idx * 34))
+
+        # 6. Action Buttons
+        button_defs = [
+            ("RETRY FIGHT  (R)", (235, 45, 60)),
+            ("MAIN MENU  (M)", (160, 150, 190)),
+            ("QUIT  (Q)", (110, 110, 130)),
+        ]
+        btn_w, btn_h = 320, 48
+        btn_rects = []
+        for i, (b_text, b_col) in enumerate(button_defs):
+            b_rect = pygame.Rect(self.width // 2 - btn_w // 2, 420 + i * 65, btn_w, btn_h)
+            btn_rects.append(b_rect)
+            is_hover = (i == selected_btn) or b_rect.collidepoint(mouse_pos)
+            self._draw_button(b_rect, b_text, is_hover, accent_color=b_col, bg_color=(28, 12, 18))
+
+        pygame.display.flip()
+        self.clock.tick(60)
+        return btn_rects
+
+    def draw_victory_screen(self, fight: int, stats: dict, selected_btn: int, mouse_pos: tuple):
+        """Draws the radiant triumphant golden-crimson victory screen."""
+        now_ticks = pygame.time.get_ticks()
+        self.anim_tick += 1
+
+        self.draw_menu_bg(dim_alpha=170)
+
+        # 1. Rising celebratory victory embers
+        for p in self.victory_embers:
+            p["y"] -= p["speed"]
+            p["x"] += math.sin(p["y"] * 0.05 + now_ticks * 0.005) * 0.8
+            if p["y"] < 50:
+                p["y"] = random.randint(650, 720)
+                p["x"] = random.randint(100, self.width - 100)
+            pygame.draw.circle(self.screen, (255, 215, 60), (int(p["x"]), int(p["y"])), p["rad"])
+            pygame.draw.circle(self.screen, (255, 255, 230), (int(p["x"]), int(p["y"])), max(1, p["rad"] - 1))
+
+        # 2. Grand Victory Title
+        shadow = self.font_huge.render("VICTORY ACHIEVED", True, (0, 0, 0))
+        self.screen.blit(shadow, (self.width // 2 - shadow.get_width() // 2 + 3, 123))
+        title = self.font_huge.render("VICTORY ACHIEVED", True, (255, 215, 60))
+        self.screen.blit(title, (self.width // 2 - title.get_width() // 2, 120))
+
+        sub_text = f"FIGHT {fight} CONQUERED — BLOODSHED CLEARED"
+        txt_sub = self.font_subtitle.render(sub_text, True, (240, 220, 160))
+        self.screen.blit(txt_sub, (self.width // 2 - txt_sub.get_width() // 2, 195))
+
+        # 3. Victory Stats Box
+        stats_rect = pygame.Rect(self.width // 2 - 240, 250, 480, 130)
+        s_surf = pygame.Surface((480, 130), pygame.SRCALPHA)
+        s_surf.fill((20, 25, 20, 210))
+        self.screen.blit(s_surf, stats_rect.topleft)
+        pygame.draw.rect(self.screen, (210, 175, 50), stats_rect, width=2, border_radius=6)
+
+        stat_lines = [
+            f"Clear Time: {stats.get('duration', 0):.1f}s",
+            f"Hearts Remaining: {stats.get('hearts', 0)} / {stats.get('max_hearts', 5)}",
+            f"Total Damage Dealt: {stats.get('damage', 0):.0f}",
+        ]
+        for idx, line in enumerate(stat_lines):
+            t_s = self.font_main.render(line, True, (245, 240, 225))
+            self.screen.blit(t_s, (stats_rect.x + 30, stats_rect.y + 20 + idx * 34))
+
+        # 4. Action Buttons
+        next_label = f"NEXT FIGHT {fight + 1}  (SPACE)" if fight < C.N_FIGHTS else "GAUNTLET MASTERED  (SPACE)"
+        button_defs = [
+            (next_label, (255, 215, 60)),
+            ("RETRY FIGHT  (R)", (140, 220, 140)),
+            ("MAIN MENU  (M)", (160, 160, 190)),
+            ("QUIT  (Q)", (110, 110, 130)),
+        ]
+        btn_w, btn_h = 340, 46
+        btn_rects = []
+        for i, (b_text, b_col) in enumerate(button_defs):
+            b_rect = pygame.Rect(self.width // 2 - btn_w // 2, 405 + i * 58, btn_w, btn_h)
+            btn_rects.append(b_rect)
+            is_hover = (i == selected_btn) or b_rect.collidepoint(mouse_pos)
+            self._draw_button(b_rect, b_text, is_hover, accent_color=b_col, bg_color=(18, 22, 20))
+
+        pygame.display.flip()
+        self.clock.tick(60)
+        return btn_rects
 
     def close(self):
         pygame.quit()
