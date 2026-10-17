@@ -553,6 +553,9 @@ def main():
                     "hearts": max(0, env.player.hearts),
                     "max_hearts": env.player.max_hearts,
                 }
+                if _adapt_enabled and active_mode == "player" and player_model.total_samples > 0:
+                    top_text = player_model.top_tendencies_text(1)[0]
+                    stats["adapt_note"] = f"Boss Adaptation ({int(player_model.alpha * 100)}%): {top_text}"
 
                 # Persist adaptive model after each fight
                 _save_player_model()

@@ -2022,6 +2022,11 @@ class Renderer:
             t_s = self.font_main.render(line, True, (230, 215, 220))
             self.screen.blit(t_s, (stats_rect.x + 30, stats_rect.y + 20 + idx * 34))
 
+        # Adaptation hint
+        if stats.get("adapt_note"):
+            t_ad = self.font_small.render(f"[!] {stats['adapt_note']}", True, (255, 175, 110))
+            self.screen.blit(t_ad, (self.width // 2 - t_ad.get_width() // 2, 396))
+
         # 6. Action Buttons
         button_defs = [
             ("RETRY FIGHT  (R)", (235, 45, 60)),
@@ -2082,6 +2087,11 @@ class Renderer:
         for idx, line in enumerate(stat_lines):
             t_s = self.font_main.render(line, True, (245, 240, 225))
             self.screen.blit(t_s, (stats_rect.x + 30, stats_rect.y + 20 + idx * 34))
+
+        # Adaptation hint
+        if stats.get("adapt_note"):
+            t_ad = self.font_small.render(f"[*] {stats['adapt_note']}", True, (255, 215, 120))
+            self.screen.blit(t_ad, (self.width // 2 - t_ad.get_width() // 2, 385))
 
         # 4. Action Buttons
         next_label = f"NEXT FIGHT {fight + 1}  (SPACE)" if fight < C.N_FIGHTS else "GAUNTLET MASTERED  (SPACE)"
