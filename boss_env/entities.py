@@ -40,6 +40,7 @@ class BossState(IntEnum):
     ATTACK = 2
     HEAL   = 3
     STUN   = 4
+    DODGE  = 5
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +175,14 @@ class Boss:
     attack_hit_landed: bool = False
     frenzy_strike_index: int = 0  # 0, 1, 2 for the 3 frenzy strikes
     dash_dir: float = 1.0         # dash direction for Dual-Blade Frenzy
+
+    # --- boss dodge (human mode) ---
+    dodge_cd: int = 0             # cooldown frames remaining
+    dodge_iframes: int = 0        # active invulnerability frames remaining
+    dodge_recovery: int = 0       # vulnerable recovery frames remaining
+    dodge_timestamps: list = field(default_factory=list)  # fight frames of recent dodges
+    dodge_dir: float = 0.0        # direction moved during dodge (+1 right, -1 left)
+
 
     # ---- derived / helpers ------------------------------------------------
 

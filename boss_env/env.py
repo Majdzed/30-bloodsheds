@@ -49,7 +49,7 @@ OBS_SCALARS = [
     "fight_index", *[f"unlocked_{a.id}" for a in ABILITIES],
 ]
 PLAYER_STATES = [s.name.lower() for s in PlayerState]   # ["idle","attack","roll","parry","drink","stun","super"]
-BOSS_STATES   = [s.name.lower() for s in BossState]     # ["idle","windup","attack","heal","stun"]
+BOSS_STATES   = ["idle", "windup", "attack", "heal", "stun"]     # 5 entries (DODGE maps to idle in obs)
 BOSS_ATTACKS  = ["none"] + [a.name for a in ABILITIES]  # 8 entries
 
 OBS_SIZE = len(OBS_SCALARS) + len(PLAYER_STATES) + len(BOSS_STATES) + len(BOSS_ATTACKS)
@@ -121,15 +121,17 @@ class BossFightEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": C.FPS}
 
     def __init__(self, weapon="katana", fight=1, upgrade="health",
-                frame_skip=C.FRAME_SKIP, render_mode=None):
+                frame_skip=C.FRAME_SKIP, render_mode=None, boss_mode="benchmark"):
         super().__init__()
         assert weapon in C.WEAPONS and upgrade in ("health", "flask")
+        assert boss_mode in ("benchmark", "human"), f"Invalid boss_mode: {boss_mode}"
         assert frame_skip < C.PARRY_WINDOW_FRAMES, "parry window must exceed frame skip"
         self.weapon      = C.WEAPONS[weapon]
         self.fight       = fight
         self.upgrade     = upgrade
         self.frame_skip  = frame_skip
         self.render_mode = render_mode
+        self.boss_mode   = boss_mode
 
         self.action_space      = spaces.Discrete(N_ACTIONS)
         self.observation_space = spaces.Box(-1.0, 1.0, shape=(OBS_SIZE,), dtype=np.float32)
@@ -155,10 +157,9 @@ class BossFightEnv(gym.Env):
         self._dark_orbs: list = []
         self._heal_orbs: list = []
 
-        # ---- Adaptive boss (play.py only; off by default) -----------------
-        # When True, the boss uses a PlayerModel to weight its ability choice.
-        # NEVER set to True by train.py, test.py, or observe.py.
-        self._adaptive_boss: bool = False
+        # ---- Boss mode controls ("benchmark" vs "human") -----------------
+        # benchmark: strict frozen scripted boss (default; train.py, test.py, observe.py)
+        # human: active adaptive learning + evasive dodge mechanics (play.py)
         self._player_model = None   # PlayerModel | None
 
         # Per-ability observation window tracker (adaptation only).
@@ -166,6 +167,17 @@ class BossFightEnv(gym.Env):
         self._adapt_window_ability: int = 0    # ability id being tracked (0 = none)
         self._adapt_window_dist: float = 0.0  # distance when the window opened
         self._adapt_responses: list = []       # list of Action ints observed this window
+
+        # Player attack tracking for dodge reaction (human mode only)
+        self._attack_dodge_evaluated: bool = False
+
+    @property
+    def _adaptive_boss(self) -> bool:
+        return self.boss_mode == "human"
+
+    @property
+    def boss_dodge(self) -> bool:
+        return self.boss_mode == "human"
 
     # ---- gauntlet control -------------------------------------------------
     def set_fight(self, fight: int) -> None:
@@ -176,12 +188,12 @@ class BossFightEnv(gym.Env):
 
     # ---- Adaptive boss control (play.py only) -----------------------------
     def set_player_model(self, model) -> None:  # type: ignore
-        """Attach a PlayerModel and enable adaptive boss selection.
+        """Attach a PlayerModel and enable human mode.
 
-        Called exclusively by play.py.  Never called by training scripts.
+        Called exclusively by play.py in human mode. Never called by training scripts.
         """
         self._player_model = model
-        self._adaptive_boss = True
+        self.boss_mode = "human"
 
     # ---- Gymnasium API ----------------------------------------------------
     def reset(self, seed=None, options=None):
@@ -201,10 +213,11 @@ class BossFightEnv(gym.Env):
         self.dark_orb_dialogue_timer = 0
         self.dark_orb_countered = False
 
-        # Reset per-episode adaptation window
+        # Reset per-episode adaptation window and dodge evaluation
         self._adapt_window_ability = 0
         self._adapt_window_dist    = 0.0
         self._adapt_responses      = []
+        self._attack_dodge_evaluated = False
 
         max_hp = C.boss_max_hp(self.fight)
         max_hearts = C.max_hearts_for_fight(self.fight, self.upgrade)
@@ -359,28 +372,80 @@ class BossFightEnv(gym.Env):
                         p.reload_idle_timer = 0
 
         if p.state == PlayerState.ATTACK:
+            # --- Boss Dodge check (human mode only, fight 10+) ---
+            total_windup = C.sec(self.weapon.light_windup_s if p.pending_attack_id == 1 else self.weapon.heavy_windup_s)
+            elapsed = total_windup - p.action_timer
+            react_frames = C.sec(C.boss_react_time_s(self.fight))
+            if (self.boss_mode == "human"
+                    and self.fight >= C.DODGE_UNLOCK_FIGHT
+                    and not self._attack_dodge_evaluated
+                    and elapsed >= react_frames
+                    and p.action_timer > 0):
+                self._attack_dodge_evaluated = True
+                if b.state == BossState.IDLE and b.recovery_timer == 0 and b.dodge_cd == 0:
+                    recent_dodges = [t for t in b.dodge_timestamps if (self._fight_frame - t) < C.sec(10.0)]
+                    if len(recent_dodges) < C.DODGE_MAX_PER_10S:
+                        dodge_prob = C.boss_dodge_prob(self.fight)
+                        if self._player_model is not None and self._player_model.total_samples > 0:
+                            tend = self._player_model.tendencies()
+                            attack_rate = tend.get("attack", 0.0)
+                            dodge_prob = min(0.95, dodge_prob * (1.0 + attack_rate * 0.3))
+                        if float(self.np_random.random()) < dodge_prob:
+                            b.state = BossState.DODGE
+                            b.dodge_iframes = C.sec(C.DODGE_IFRAMES_S)
+                            b.action_timer = C.sec(C.DODGE_IFRAMES_S + C.DODGE_RECOVERY_S)
+                            b.dodge_recovery = C.sec(C.DODGE_RECOVERY_S)
+                            b.dodge_cd = C.sec(C.boss_dodge_cooldown_s(self.fight))
+                            b.dodge_timestamps.append(self._fight_frame)
+                            b.dodge_timestamps = [t for t in b.dodge_timestamps if (self._fight_frame - t) < C.sec(10.0)]
+
+                            # Evasive movement: 120u away from player, clamped to walls
+                            dir_away = 1.0 if b.x >= p.x else -1.0
+                            if dir_away > 0:
+                                if (C.ARENA_W - b.x) < C.DODGE_DISTANCE:
+                                    # Cornered against right wall: dash to the left of the player
+                                    target_x = max(0.0, p.x - C.DODGE_DISTANCE)
+                                    b.dodge_dir = -1.0
+                                else:
+                                    target_x = min(C.ARENA_W, b.x + C.DODGE_DISTANCE)
+                                    b.dodge_dir = 1.0
+                            else:
+                                if b.x < C.DODGE_DISTANCE:
+                                    # Cornered against left wall: dash to the right of the player
+                                    target_x = min(C.ARENA_W, p.x + C.DODGE_DISTANCE)
+                                    b.dodge_dir = 1.0
+                                else:
+                                    target_x = max(0.0, b.x - C.DODGE_DISTANCE)
+                                    b.dodge_dir = -1.0
+                            b.x = float(target_x)
+
             if p.action_timer == 0:
                 # --- Damage resolution: end of windup ---
                 dist = abs(b.x - p.x)
-                if p.pending_attack_id == 1:        # light attack
-                    if dist <= self.weapon.light_range:
-                        dmg = min(self.weapon.light_dmg, b.hp)
-                        b.hp -= dmg
-                        self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
-                        self._damage_dealt += dmg
-                        if b.hp <= 0:
-                            b.hp = 0
-                            self._terminated = True
+                boss_invulnerable = (b.state == BossState.DODGE and b.dodge_iframes > 0)
+                if not boss_invulnerable:
+                    if p.pending_attack_id == 1:        # light attack
+                        if dist <= self.weapon.light_range:
+                            dmg = min(self.weapon.light_dmg, b.hp)
+                            b.hp -= dmg
+                            self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
+                            self._damage_dealt += dmg
+                            if b.hp <= 0:
+                                b.hp = 0
+                                self._terminated = True
+                    elif p.pending_attack_id == 2:      # heavy attack
+                        if dist <= self.weapon.heavy_range:
+                            dmg = min(self.weapon.heavy_dmg, b.hp)
+                            b.hp -= dmg
+                            self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
+                            self._damage_dealt += dmg
+                            if b.hp <= 0:
+                                b.hp = 0
+                                self._terminated = True
+
+                if p.pending_attack_id == 1:
                     p.recovery_timer = C.sec(self.weapon.light_recovery_s)
-                elif p.pending_attack_id == 2:      # heavy attack
-                    if dist <= self.weapon.heavy_range:
-                        dmg = min(self.weapon.heavy_dmg, b.hp)
-                        b.hp -= dmg
-                        self._tick_reward  += C.REWARD["damage_dealt"] * (dmg / b.max_hp)
-                        self._damage_dealt += dmg
-                        if b.hp <= 0:
-                            b.hp = 0
-                            self._terminated = True
+                elif p.pending_attack_id == 2:
                     p.recovery_timer = C.sec(self.weapon.heavy_recovery_s)
 
                 # Check orb destruction (Siphon Heal mechanic)
@@ -483,7 +548,10 @@ class BossFightEnv(gym.Env):
                 p.hearts = min(p.max_hearts, p.hearts + C.FLASK_HEAL_HEARTS)
                 p.state  = PlayerState.IDLE
 
-        elif p.state == PlayerState.IDLE:
+        if p.state != PlayerState.ATTACK:
+            self._attack_dodge_evaluated = False
+
+        if p.state == PlayerState.IDLE:
             # Accept new action input when recovery has also cleared
             if p.recovery_timer == 0:
                 if action == Action.LIGHT_ATTACK and not p.airborne:
@@ -711,6 +779,14 @@ class BossFightEnv(gym.Env):
             if b.ability_cd[aid] > 0:
                 b.ability_cd[aid] -= 1
 
+        # --- decrement dodge cooldown and i-frames ---
+        if b.dodge_cd > 0:
+            b.dodge_cd -= 1
+        if b.dodge_iframes > 0:
+            b.dodge_iframes -= 1
+        if b.dodge_recovery > 0:
+            b.dodge_recovery -= 1
+
         if b.state == BossState.WINDUP:
             # Teleport during slash windup if blink was triggered
             if b.blink_pending and b.action_timer <= (self._boss_windup_total // 2):
@@ -862,6 +938,14 @@ class BossFightEnv(gym.Env):
 
         elif b.state == BossState.STUN:
             # Boss stunned: wait out action_timer, then recover
+            if b.action_timer == 0:
+                b.state              = BossState.IDLE
+                b.current_ability_id = 0
+                b.attack_hit_landed  = False
+                b.recovery_timer     = C.sec(C.BOSS_GLOBAL_RECOVERY_S)
+
+        elif b.state == BossState.DODGE:
+            # Boss dodging: action_timer counts down i-frames then recovery
             if b.action_timer == 0:
                 b.state              = BossState.IDLE
                 b.current_ability_id = 0
@@ -1089,7 +1173,8 @@ class BossFightEnv(gym.Env):
             obs[_PS_START + int(p.state)] = 1.0
 
             # ---- boss state one-hot (5) ----
-            obs[_BS_START + int(b.state)] = 1.0
+            obs_boss_state = BossState.IDLE if b.state == BossState.DODGE else b.state
+            obs[_BS_START + int(obs_boss_state)] = 1.0
 
             # ---- boss attack one-hot (8: none=0, abilities 1..7) ----
             obs[_BA_START + b.current_ability_id] = 1.0

@@ -249,31 +249,48 @@ This inductive bias separates self-kinematics from opponent state and arena haza
 
 ---
 
-## 9. Adaptive Boss (Human Play Mode)
+## 9. Unified Boss Mode (Human vs. Benchmark)
 
-When playing as a human (`play.py`), the boss learns from you across fights using a **Markov-style player model**. It observes what you tend to do during each ability window (roll, jump, parry, attack, etc.) and gradually biases its ability selection to exploit your patterns.
+The boss operates under a unified mode switch: `boss_mode = "benchmark" | "human"`:
+- **`benchmark`** *(Default for RL)*: The deterministic, frozen, scripted gauntlet. Used exclusively by `train.py`, `test.py`, and `observe.py` to ensure valid baseline comparisons and reproducible benchmark metrics.
+- **`human`** *(Default for `play.py`)*: Activates dynamic combat intelligence tailored for human players, combining **Markov-style player adaptation** and reactive **Boss Dodge**.
 
-### How to play with it
+---
+
+### 9.1 Adaptive Boss (Markov Player Model)
+When playing as a human, the boss observes what you tend to do during each ability window (roll, jump, parry, attack, stay far) and gradually biases its ability selection to counter your habits:
+- **Context:** Discretized as `(boss_attack_id, distance_bucket)`.
+- **Response:** Discretized player action during windup & active frames.
+- **Counter Matrix:** Derived from SPEC mechanics (e.g., parry spammers trigger unparriable *Dark Spikes*, roll spammers face *Dark Orb*).
+- **Blend Formula:** $P = (1 - \alpha) \cdot P_{\text{uniform}} + \alpha \cdot P_{\text{learned}}$, where $\alpha \le 0.60$ so the boss remains beatable.
+- **Model Persistence:** Stored in `player_model.json` next to `play.py`. Learning freezes after Fight 10.
+
+---
+
+### 9.2 Boss Dodge Ability
+Starting at **Fight 10**, the boss gains an evasive maneuver when human attacks are telegraphed:
+- **Trigger:** Boss in `IDLE` state detecting an unlanded player attack windup exceeding `BOSS_REACT_TIME`.
+- **Scaling Reaction Time:** 0.20s at Fight 10 $\to$ 0.10s at Fight 30. (Light attacks cannot be dodged at default react time; heavy attacks can be dodged).
+- **Scaling Probability & Cooldown:** $50\% \to 80\%$ dodge probability; $5.0\text{s} \to 3.5\text{s}$ cooldown (rate-limited to 2 dodges per 10s window).
+- **Invulnerability & Counter-Play:** 0.25s of active invulnerability (attacks whiff and deal 0 damage), followed by 0.30s of vulnerable recovery where hits land for full damage.
+- **Evasion & Corner Escape:** Dashes 120 units away from the player. If cornered against an arena boundary, executes a cross-dash past the player to the open side.
+- **Supers are Unstoppable:** Blood Katana and Ultra Plasma Shot can never be dodged.
+
+---
+
+### 9.3 CLI Usage
 
 ```bash
-# Default: adaptive boss ON
-uv run python play.py
+# Play with full human mode (Adaptation + Dodge active by default)
+uv run python play.py --weapon katana --fight 10
 
-# Disable adaptive boss (scripted gauntlet, as before)
-uv run python play.py --no-adapt
+# Play in benchmark mode (scripted boss, same as RL training)
+uv run python play.py --boss-mode benchmark --weapon katana --fight 10
+
+# Disable adaptation while keeping dodge (or vice-versa)
+uv run python play.py --no-adapt --weapon katana --fight 10
 ```
 
-The boss model is saved to `player_model.json` next to `play.py` and reloaded automatically on the next launch (persistent across sessions). Delete `player_model.json` to reset the model.
+> **Strict Benchmark Invariance:** `boss_mode="benchmark"` guarantees identical RNG consumption, state transitions, and step speed to the original environment. Observation space shape remains strictly 52 floats.
 
-### Key design properties
-
-| Property | Value |
-|:---|:---|
-| Max boss adaptation blend (`ALPHA_MAX`) | 0.60 (stays beatable) |
-| Samples to reach max blend (`SAMPLES_REF`) | 50 observed ability windows |
-| Learning stops after fight | 10 (`LEARN_UNTIL_FIGHT`) |
-| Weighted selection starts at fight | 4 (`APPLY_FROM_FIGHT`) |
-
-> **RL training is unaffected.** The adaptive boss is strictly opt-in via `play.py`. `train.py`, `test.py`, and `observe.py` use the original uniform random ability selection.
-
-See **SPEC.md §9** for the full specification including the counter matrix, JSON format, and hard constraints.
+See **SPEC.md §9 & §10** for complete mathematical and implementation specifications.

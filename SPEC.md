@@ -264,3 +264,48 @@ These are printed to the console on exit and can be shown in the post-fight HUD.
 - The observation space, action space, and reward function are **not modified**.
 - No saved models require retraining.
 - The boss's seeded RNG (`self.np_random`) is used for the weighted sample so that replay with the same seed + same model state is still reproducible.
+
+## 10. Boss Dodge & Unified Boss Mode (Human Mode Only)
+
+> **Scope:** The Boss Dodge ability is part of the unified `boss_mode = "human"` setting.  It is active **only** in `play.py` during player mode (default).  `train.py`, `test.py`, and `observe.py` always use `boss_mode = "benchmark"`, keeping the benchmark MDP completely untouched.
+
+### 10.1 Unified Boss Mode
+
+Instead of fragmented toggles, `BossFightEnv` exposes:
+- `boss_mode = "benchmark"` (default): The strict, scripted, frozen gauntlet that RL agents train on and are evaluated against.
+- `boss_mode = "human"`: Enables both the online Markov adaptive player model (§9) and the evasive Boss Dodge (§10).
+
+### 10.2 Dodge Trigger & Scaling Rules
+
+- **Unlock:** Available starting from **Fight 10** (`DODGE_UNLOCK_FIGHT = 10`).
+- **State Requirement:** Boss can only initiate a dodge from `BossState.IDLE` with `recovery_timer == 0` and `dodge_cd == 0`. It cannot dodge while winding up, attacking, healing, stunned, or recovering.
+- **Evaluation Timing:** When a player attack has been in windup for at least `BOSS_REACT_TIME` and has not yet landed, the boss rolls the seeded RNG against `DODGE_PROB`. Evaluated at most once per player attack.
+- **Supers:** Blood Katana and Ultra Plasma Shot **cannot be dodged**.
+
+**Dynamic Scaling Schedules (Fights 10 to 30):**
+
+| Parameter | Fight 10 | Fight 30 | Formula (Linear) |
+|:---|:---:|:---:|:---|
+| `BOSS_REACT_TIME` | 0.20 s | 0.10 s | `0.20 - (fight - 10) * 0.005` |
+| `DODGE_PROB` | 0.50 | 0.80 | `0.50 + (fight - 10) * 0.015` |
+| `DODGE_COOLDOWN` | 5.0 s | 3.5 s | `5.0 - (fight - 10) * 0.075` |
+| Max Dodges / 10s | 2 | 2 | Rate-limited rolling window |
+
+*Note on light attacks:* At Fight 10, Katana light windup is 0.20s and Revolver light windup is 0.15s. Because react time is 0.20s, light attacks naturally land before the react threshold, guaranteeing that light attacks cannot be dodged at default react time. Heavy attacks (0.50s / 0.60s windup) give the boss ample time to react.
+
+### 10.3 Dodge Movement & Invulnerability
+
+- **Invulnerability:** 0.25 s (15 frames) of active i-frames (`DODGE_IFRAMES_S`). Hits landing during i-frames deal 0 damage and are consumed.
+- **Movement:** Moves 120 u directly away from the player (`DODGE_DISTANCE = 120.0`), clamped to the arena boundaries `[0, ARENA_W]`.
+- **Cornered Escape:** If the boss has $< 120\,\text{u}$ of wall space behind it, it executes a cross-dash past the player to the opposite side (`p.x - 120u` or `p.x + 120u`), escaping the corner.
+- **Recovery:** Followed by 0.30 s (18 frames) of vulnerable recovery (`DODGE_RECOVERY_S`) where the boss cannot act. Any hit landing during recovery deals full damage.
+
+### 10.4 Observation Space Mapping & Known Limitation
+
+- To preserve strict compatibility with SB3 policies and existing checkpoints, the 52-float observation space shape is **unchanged**.
+- `BossState.DODGE` (state enum value 5) is mapped to `BossState.IDLE` in the 5-element one-hot boss state vector:
+  ```python
+  obs_boss_state = BossState.IDLE if b.state == BossState.DODGE else b.state
+  obs[_BS_START + int(obs_boss_state)] = 1.0
+  ```
+- *Known Limitation:* An RL agent observing human mode would observe the boss as `IDLE` during a dodge. Since RL agents only evaluate in `benchmark` mode, this has zero impact on training or benchmarking.

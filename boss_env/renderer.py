@@ -91,6 +91,11 @@ class NightBorneBossAnimator:
             # Siphon Heal: casting posture with raised blade
             frames = self.animations["attack"]
             frame = frames[min(len(frames) - 1, 4)]
+        elif boss.state == BossState.DODGE:
+            # Fast dash frames during evasive dodge
+            frames = self.animations["run"]
+            idx = (tick // 3) % len(frames)
+            frame = frames[idx]
         else:
             # Idle vs Movement
             dist_to_player = abs(player_x - boss.x)
@@ -729,6 +734,23 @@ class Renderer:
                 pygame.draw.circle(heal_surf, (50, 230, 120, alpha), (60, 60), 50)
                 self.screen.blit(heal_surf, (bsx - 60, bsy - 100))
 
+            # Boss Dodge visual indicator (ethereal afterimages or vulnerable recovery ring)
+            if b.state == BossState.DODGE:
+                dodge_dir = getattr(b, "dodge_dir", 1.0)
+                if getattr(b, "dodge_iframes", 0) > 0:
+                    if frame is not None:
+                        ghost = frame.copy()
+                        ghost.fill((80, 200, 255, 120), special_flags=pygame.BLEND_RGBA_MULT)
+                        self.screen.blit(ghost, (draw_x - int(dodge_dir * 28), draw_y))
+                        ghost2 = frame.copy()
+                        ghost2.fill((140, 80, 240, 70), special_flags=pygame.BLEND_RGBA_MULT)
+                        self.screen.blit(ghost2, (draw_x - int(dodge_dir * 56), draw_y))
+                else:
+                    vuln_surf = pygame.Surface((80, 80), pygame.SRCALPHA)
+                    alpha = int(100 + 60 * math.sin(now_ticks * 0.03))
+                    pygame.draw.circle(vuln_surf, (255, 180, 50, alpha), (40, 40), 32, width=3)
+                    self.screen.blit(vuln_surf, (bsx - 40, bsy - 60))
+
             if frame is not None:
                 self.screen.blit(frame, (draw_x, draw_y))
         else:
@@ -741,6 +763,8 @@ class Renderer:
                 b_color = (190, 50, 80)
             elif b.state == BossState.HEAL:
                 b_color = (50, 200, 120)
+            elif b.state == BossState.DODGE:
+                b_color = (60, 200, 255) if getattr(b, "dodge_iframes", 0) > 0 else (255, 180, 60)
             else:
                 b_color = (130, 40, 150)
 

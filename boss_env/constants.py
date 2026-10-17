@@ -160,3 +160,29 @@ DARK_ORB_SPEED          = 400.0   # 400 u/s (SPEC §5 ability table)
 DARK_ORB_HIT_RADIUS     = 25.0    # u
 DARK_ORB_PARRY_DIST     = 80.0    # u (distance where orb_parry_window obs becomes 1.0)
 
+# ---- Boss Dodge constants (human mode only, SPEC §10) ----------------------
+DODGE_UNLOCK_FIGHT = 10
+DODGE_IFRAMES_S = 0.25         # 15 frames of invulnerability
+DODGE_DISTANCE = 120.0         # u moved away from player
+DODGE_RECOVERY_S = 0.30        # 18 frames vulnerable after dodge
+DODGE_MAX_PER_10S = 2          # rate limit: max 2 dodges in a rolling 10s window
+
+
+def boss_react_time_s(fight: int) -> float:
+    """Reaction threshold in seconds: 0.20s at fight 10 shrinking to 0.10s at fight 30."""
+    f = max(10, min(30, fight))
+    return 0.20 - (f - 10) * (0.20 - 0.10) / 20.0
+
+
+def boss_dodge_prob(fight: int) -> float:
+    """Dodge trigger probability: 0.5 at fight 10 rising to 0.8 at fight 30."""
+    f = max(10, min(30, fight))
+    return 0.50 + (f - 10) * (0.80 - 0.50) / 20.0
+
+
+def boss_dodge_cooldown_s(fight: int) -> float:
+    """Dodge cooldown in seconds: 5.0s at fight 10 shrinking to 3.5s at fight 30."""
+    f = max(10, min(30, fight))
+    return 5.0 - (f - 10) * (5.0 - 3.5) / 20.0
+
+

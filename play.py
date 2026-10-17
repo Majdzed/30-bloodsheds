@@ -132,30 +132,33 @@ def main():
     parser.add_argument("--upgrade", type=str, default="health", choices=["health", "flask"])
     parser.add_argument("--skip-menu", action="store_true", help="Start directly in combat mode")
     parser.add_argument("--mode", type=str, default="player", choices=["player", "agent"],
-                        help="Initial combat mode: player or agent")
+    parser.add_argument("--boss-mode", type=str, default="human", choices=["human", "benchmark"],
+                        help="Boss behavior mode: human (adaptation + dodge) or benchmark (scripted)")
     parser.add_argument("--no-adapt", action="store_true",
-                        help="Disable adaptive boss (boss does not learn from player)")
+                        help="Disable human adaptations (forces boss to benchmark mode)")
     args = parser.parse_args()
 
     renderer = Renderer()
 
-    # ---- Adaptive boss PlayerModel (persists across fights / retries) ----
+    # ---- Boss Mode and PlayerModel (persists across fights / retries) ----
+    _boss_mode_setting = "benchmark" if args.no_adapt else args.boss_mode
     _MODEL_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "player_model.json")
     player_model = PlayerModel()
-    if not args.no_adapt and os.path.exists(_MODEL_JSON_PATH):
+    if _boss_mode_setting == "human" and os.path.exists(_MODEL_JSON_PATH):
         try:
             with open(_MODEL_JSON_PATH, "r", encoding="utf-8") as _f:
                 player_model = PlayerModel.from_json(_f.read())
-            print(f"[Adaptive Boss] Loaded player model ({player_model.total_samples} samples)")
+            print(f"[Boss Mode: HUMAN] Loaded player model ({player_model.total_samples} samples, dodge enabled)")
         except Exception as _e:
-            print(f"[Adaptive Boss] Could not load model: {_e} – starting fresh")
+            print(f"[Boss Mode: HUMAN] Could not load model: {_e} – starting fresh")
             player_model = PlayerModel()
-    _adapt_enabled = not args.no_adapt
+    elif _boss_mode_setting == "benchmark":
+        print("[Boss Mode: BENCHMARK] Scripted boss gauntlet (no adaptation, no dodge)")
 
     def _save_player_model():
         """Persist the player model to JSON next to play.py."""
-        if not _adapt_enabled:
+        if _boss_mode_setting != "human":
             return
         try:
             with open(_MODEL_JSON_PATH, "w", encoding="utf-8") as _f:
@@ -200,9 +203,15 @@ def main():
 
     def init_battle(weapon_name: str, fight_idx: int):
         nonlocal env, agent, obs, fight_start_time, boss_start_hp
-        env = BossFightEnv(weapon=weapon_name, fight=fight_idx, upgrade=upgrade_path, frame_skip=1)
-        # Attach adaptive model only for human (player) mode
-        if _adapt_enabled and active_mode == "player":
+        mode_for_fight = _boss_mode_setting if active_mode == "player" else "benchmark"
+        env = BossFightEnv(
+            weapon=weapon_name,
+            fight=fight_idx,
+            upgrade=upgrade_path,
+            frame_skip=1,
+            boss_mode=mode_for_fight,
+        )
+        if mode_for_fight == "human":
             player_model.set_fight(fight_idx)
             env.set_player_model(player_model)
         obs, _ = env.reset()
@@ -553,7 +562,7 @@ def main():
                     "hearts": max(0, env.player.hearts),
                     "max_hearts": env.player.max_hearts,
                 }
-                if _adapt_enabled and active_mode == "player" and player_model.total_samples > 0:
+                if _boss_mode_setting == "human" and active_mode == "player" and player_model.total_samples > 0:
                     top_text = player_model.top_tendencies_text(1)[0]
                     stats["adapt_note"] = f"Boss Adaptation ({int(player_model.alpha * 100)}%): {top_text}"
 
