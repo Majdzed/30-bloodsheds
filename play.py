@@ -142,24 +142,21 @@ def main():
     renderer = Renderer()
 
     # ---- Boss Mode and PlayerModel (persists across fights / retries) ----
-    _boss_mode_setting = "benchmark" if args.no_adapt else args.boss_mode
     _MODEL_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "player_model.json")
     player_model = PlayerModel()
-    if _boss_mode_setting == "human" and os.path.exists(_MODEL_JSON_PATH):
+    if os.path.exists(_MODEL_JSON_PATH):
         try:
             with open(_MODEL_JSON_PATH, "r", encoding="utf-8") as _f:
                 player_model = PlayerModel.from_json(_f.read())
-            print(f"[Boss Mode: HUMAN] Loaded player model ({player_model.total_samples} samples, dodge enabled)")
+            print(f"[Boss Mode: HUMAN] Loaded player model ({player_model.total_samples} samples, adaptation & dodge active in Player mode)")
         except Exception as _e:
             print(f"[Boss Mode: HUMAN] Could not load model: {_e} – starting fresh")
             player_model = PlayerModel()
-    elif _boss_mode_setting == "benchmark":
-        print("[Boss Mode: BENCHMARK] Scripted boss gauntlet (no adaptation, no dodge)")
 
     def _save_player_model():
         """Persist the player model to JSON next to play.py."""
-        if _boss_mode_setting != "human":
+        if player_model.total_samples == 0:
             return
         try:
             with open(_MODEL_JSON_PATH, "w", encoding="utf-8") as _f:
@@ -204,7 +201,7 @@ def main():
 
     def init_battle(weapon_name: str, fight_idx: int):
         nonlocal env, agent, obs, fight_start_time, boss_start_hp
-        mode_for_fight = _boss_mode_setting if active_mode == "player" else "benchmark"
+        mode_for_fight = "human" if active_mode == "player" else "benchmark"
         env = BossFightEnv(
             weapon=weapon_name,
             fight=fight_idx,
@@ -563,7 +560,7 @@ def main():
                     "hearts": max(0, env.player.hearts),
                     "max_hearts": env.player.max_hearts,
                 }
-                if _boss_mode_setting == "human" and active_mode == "player" and player_model.total_samples > 0:
+                if active_mode == "player" and player_model.total_samples > 0:
                     top_text = player_model.top_tendencies_text(1)[0]
                     stats["adapt_note"] = f"Boss Adaptation ({int(player_model.alpha * 100)}%): {top_text}"
 
@@ -594,7 +591,7 @@ def main():
             )
 
     _save_player_model()
-    if _adapt_enabled:
+    if player_model.total_samples > 0:
         print(f"[Adaptive Boss] Model saved ({player_model.total_samples} samples, "
               f"alpha={player_model.alpha:.2f})")
         tend = player_model.tendencies()
