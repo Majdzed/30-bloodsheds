@@ -177,3 +177,90 @@ Report convergence with the **undiscounted total reward per episode** in TensorB
 - Weights carry over from fight to fight, with some episodes replayed from earlier unlock stages to limit forgetting.
 - Algorithm: MaskablePPO with a custom features extractor.
 - Baseline: rule-based agent, one version per weapon, evaluated on the same fights and seeds.
+
+## 9. Adaptive Boss (Interactive / Human Play Mode Only)
+
+> **Scope:** This feature is active **only** in `play.py` when a human is playing (not for RL training or evaluation).  The flag is `env._adaptive_boss = False` by default and is flipped by `env.set_player_model(model)`.  All constants below are tunable in `boss_env/adaptation.py`.
+
+### 9.1 Concept
+
+The boss maintains a **Markov-style player model** that accumulates observations of how the human player responds to each boss ability.  After collecting enough data, the boss skews its random ability selection to exploit the player's tendencies, making it progressively harder to exploit predictable patterns.
+
+### 9.2 Player Model (`boss_env/adaptation.py`)
+
+**Context** = `(boss_ability_id ∈ {1..7},  distance_bucket ∈ {close, mid, far})`
+- `close`: distance < 100 u
+- `mid`: 100 u ≤ distance ≤ 300 u
+- `far`: distance > 300 u
+
+**Response** = dominant player behaviour observed during the boss ability's windup + active window, collapsed to one label (priority order):
+`parry > roll > jump > attack > move_toward > move_away > idle`
+
+**Count table**: `counts[context][response]` — integer observation counts.
+
+**Tendencies** (queried each time the boss picks an ability):
+```
+tendency[r] = Σ_ctx counts[ctx][r] / total_samples
+```
+Returns uniform `1/7` per response if no data yet.
+
+### 9.3 Counter Matrix
+
+Derived from SPEC §3 (player evasion rules) and §5 (ability table).  Each ability has a weight per response:
+
+| Response     | Best countering abilities |
+|:---|:---|
+| `roll`       | Dark Orb (6) — roll i-frames do NOT avoid it |
+| `jump`       | Lightning Strike (1), Light Bolt (4), Frenzy (7), Dark Orb (6) |
+| `parry`      | Dark Spikes (2) — cannot be parried |
+| `idle/stand` | Dark Spikes (2), Lightning Strike (1) |
+| `move_away`  | Dark Wave (3), Light Bolt (4), blink+Lightning Strike (1) |
+| `move_toward`| Lightning Strike (1) — melee range punishment |
+
+### 9.4 Weighted Ability Selection
+
+Replaces the uniform `np_random.choice(candidates)` in the boss IDLE decision:
+
+```
+alpha       = min(ALPHA_MAX, total_samples / SAMPLES_REF)
+learned_p   = softmax(counter_score)        # via tendency dot-product
+final_p     = (1 - alpha) * uniform + alpha * learned_p
+chosen_id   = weighted_sample(candidates, final_p, rng=self.np_random)
+```
+
+**Constants** (playtest-tunable):
+
+| Constant          | Value | Purpose |
+|:---|:---:|:---|
+| `ALPHA_MAX`       | 0.6   | Max boss-learns fraction; keeps the boss beatable |
+| `SAMPLES_REF`     | 50    | Observations needed to reach `ALPHA_MAX` |
+| `LEARN_UNTIL_FIGHT` | 10  | Model freezes (no new obs accepted) after this fight |
+| `APPLY_FROM_FIGHT`  | 4   | Weighted selection starts here (fights 1-3: only 1 candidate) |
+
+The `Siphon Heal` priority rule (SPEC §5 step 1) is **unchanged** and still executes before any weighted selection.
+
+### 9.5 Lifetime and Persistence
+
+- The `PlayerModel` is created once per game session in `play.py`.
+- It **persists across fights and retries** within a session.
+- It is **saved to `player_model.json`** next to `play.py` when a fight ends and on exit.
+- It is **loaded on startup** if the file exists.
+- Delete `player_model.json` to start fresh.
+- The model is **never attached** when an RL agent is playing (`Agent vs Boss` mode).
+
+### 9.6 Human-Readable Feedback
+
+`PlayerModel.top_tendencies_text()` returns up to 3 lines such as:
+```
+"You roll 62% of the time"
+"You jump 18% of the time"
+"You parry 11% of the time"
+```
+These are printed to the console on exit and can be shown in the post-fight HUD.
+
+### 9.7 Hard Constraints (not to be changed)
+
+- `adaptive_boss=False` by default.  RL training (`train.py`), evaluation (`test.py`), and agent observation (`observe.py`) must **never** call `set_player_model()`.
+- The observation space, action space, and reward function are **not modified**.
+- No saved models require retraining.
+- The boss's seeded RNG (`self.np_random`) is used for the weighted sample so that replay with the same seed + same model state is still reproducible.

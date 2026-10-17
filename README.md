@@ -246,3 +246,34 @@ This inductive bias separates self-kinematics from opponent state and arena haza
 3. Raffin, A. et al. (2021). *Stable-Baselines3: Reliable Reinforcement Learning Implementations*. Journal of Machine Learning Research (JMLR).
 4. Towers, M. et al. (2023). *Gymnasium: A Standard Interface for Reinforcement Learning Environments*.
 5. Game design and combat mechanics inspired by *Sekiro: Shadows Die Twice* (FromSoftware) parry-stagger dynamics and *Enter the Gungeon* (Dodge Roll) tactical projectile spacing.
+
+---
+
+## 9. Adaptive Boss (Human Play Mode)
+
+When playing as a human (`play.py`), the boss learns from you across fights using a **Markov-style player model**. It observes what you tend to do during each ability window (roll, jump, parry, attack, etc.) and gradually biases its ability selection to exploit your patterns.
+
+### How to play with it
+
+```bash
+# Default: adaptive boss ON
+uv run python play.py
+
+# Disable adaptive boss (scripted gauntlet, as before)
+uv run python play.py --no-adapt
+```
+
+The boss model is saved to `player_model.json` next to `play.py` and reloaded automatically on the next launch (persistent across sessions). Delete `player_model.json` to reset the model.
+
+### Key design properties
+
+| Property | Value |
+|:---|:---|
+| Max boss adaptation blend (`ALPHA_MAX`) | 0.60 (stays beatable) |
+| Samples to reach max blend (`SAMPLES_REF`) | 50 observed ability windows |
+| Learning stops after fight | 10 (`LEARN_UNTIL_FIGHT`) |
+| Weighted selection starts at fight | 4 (`APPLY_FROM_FIGHT`) |
+
+> **RL training is unaffected.** The adaptive boss is strictly opt-in via `play.py`. `train.py`, `test.py`, and `observe.py` use the original uniform random ability selection.
+
+See **SPEC.md §9** for the full specification including the counter matrix, JSON format, and hard constraints.

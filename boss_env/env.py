@@ -69,6 +69,52 @@ def _scalar_idx(name: str) -> int:
     return OBS_SCALARS.index(name)
 
 
+# ---------------------------------------------------------------------------
+# Adaptation helper: classify a list of Action ints into one response label
+# ---------------------------------------------------------------------------
+
+_ACTION_TO_RESPONSE = {
+    # Action id -> adaptation response string
+    0: "idle",        # IDLE
+    1: "move_toward", # MOVE_LEFT
+    2: "move_toward", # MOVE_RIGHT
+    3: "jump",        # JUMP
+    4: "attack",      # LIGHT_ATTACK
+    5: "attack",      # HEAVY_ATTACK
+    6: "roll",        # DODGE_ROLL
+    7: "parry",       # PARRY
+    8: "idle",        # USE_FLASK
+    9: "attack",      # USE_SUPER
+}
+
+_RESPONSE_PRIORITY = [
+    "parry",
+    "roll",
+    "jump",
+    "attack",
+    "move_toward",
+    "move_away",
+    "idle",
+]
+
+
+def _classify_player_response(action_ints: list) -> str:
+    """Collapse Action ints from one boss-ability window into a single response
+    label.  Priority: parry > roll > jump > attack > move > idle.
+    """
+    if not action_ints:
+        return "idle"
+    counts: dict = {r: 0 for r in _RESPONSE_PRIORITY}
+    for a in action_ints:
+        r = _ACTION_TO_RESPONSE.get(int(a), "idle")
+        if r in counts:
+            counts[r] += 1
+    for resp in _RESPONSE_PRIORITY:
+        if counts.get(resp, 0) > 0:
+            return resp
+    return "idle"
+
+
 class BossFightEnv(gym.Env):
     """One episode = one fight. The gauntlet is driven from outside via set_fight()."""
 
@@ -109,10 +155,33 @@ class BossFightEnv(gym.Env):
         self._dark_orbs: list = []
         self._heal_orbs: list = []
 
+        # ---- Adaptive boss (play.py only; off by default) -----------------
+        # When True, the boss uses a PlayerModel to weight its ability choice.
+        # NEVER set to True by train.py, test.py, or observe.py.
+        self._adaptive_boss: bool = False
+        self._player_model = None   # PlayerModel | None
+
+        # Per-ability observation window tracker (adaptation only).
+        # Tracks player actions during the current boss ability window.
+        self._adapt_window_ability: int = 0    # ability id being tracked (0 = none)
+        self._adapt_window_dist: float = 0.0  # distance when the window opened
+        self._adapt_responses: list = []       # list of Action ints observed this window
+
     # ---- gauntlet control -------------------------------------------------
     def set_fight(self, fight: int) -> None:
         """Select the fight (1..30). Takes effect on the next reset()."""
         self.fight = int(np.clip(fight, 1, C.N_FIGHTS))
+        if self._adaptive_boss and self._player_model is not None:
+            self._player_model.set_fight(self.fight)
+
+    # ---- Adaptive boss control (play.py only) -----------------------------
+    def set_player_model(self, model) -> None:  # type: ignore
+        """Attach a PlayerModel and enable adaptive boss selection.
+
+        Called exclusively by play.py.  Never called by training scripts.
+        """
+        self._player_model = model
+        self._adaptive_boss = True
 
     # ---- Gymnasium API ----------------------------------------------------
     def reset(self, seed=None, options=None):
@@ -131,6 +200,11 @@ class BossFightEnv(gym.Env):
         self.dark_orb_dialogue = ""
         self.dark_orb_dialogue_timer = 0
         self.dark_orb_countered = False
+
+        # Reset per-episode adaptation window
+        self._adapt_window_ability = 0
+        self._adapt_window_dist    = 0.0
+        self._adapt_responses      = []
 
         max_hp = C.boss_max_hp(self.fight)
         max_hearts = C.max_hearts_for_fight(self.fight, self.upgrade)
@@ -201,6 +275,36 @@ class BossFightEnv(gym.Env):
         b = self.boss
 
         dt = 1.0 / C.FPS   # seconds per frame
+
+        # ================================================================
+        # Adaptive boss: track player response during boss ability window
+        # ================================================================
+        if self._adaptive_boss and self._player_model is not None:
+            _b_ability = b.state if b is not None and self.boss is not None else None
+            # Open a new observation window when boss starts a new windup
+            if (b is not None and b.state == BossState.WINDUP
+                    and b.current_ability_id != 0
+                    and self._adapt_window_ability != b.current_ability_id):
+                self._adapt_window_ability = b.current_ability_id
+                self._adapt_window_dist    = abs(b.x - p.x) if p is not None else 0.0
+                self._adapt_responses      = []
+            # Collect player action while window is open
+            if self._adapt_window_ability != 0:
+                self._adapt_responses.append(int(action))
+            # Close the window when boss returns to IDLE (attack phase finished)
+            if (self._adapt_window_ability != 0
+                    and b is not None
+                    and b.state == BossState.IDLE
+                    and b.current_ability_id == 0):
+                if self._adapt_responses:
+                    _resp = _classify_player_response(self._adapt_responses)
+                    self._player_model.observe(
+                        self._adapt_window_ability,
+                        self._adapt_window_dist,
+                        _resp,
+                    )
+                self._adapt_window_ability = 0
+                self._adapt_responses      = []
 
         # ================================================================
         # Player state machine
@@ -798,7 +902,29 @@ class BossFightEnv(gym.Env):
                     if 100.0 <= dist <= 300.0 and self.fight >= 16 and b.ability_cd[7] == 0:
                         candidates.append(7)
 
-                    chosen = int(self.np_random.choice(candidates)) if candidates else 0
+                    if candidates:
+                        if (self._adaptive_boss
+                                and self._player_model is not None
+                                and len(candidates) > 1):
+                            _weights = self._player_model.weights_for_candidates(
+                                candidates, self.fight
+                            )
+                        else:
+                            _weights = None
+                        if _weights is not None:
+                            # Weighted sampling via the boss's seeded RNG
+                            _cumulative = 0.0
+                            _r = float(self.np_random.random())
+                            chosen = candidates[-1]  # fallback
+                            for _cand, _w in zip(candidates, _weights):
+                                _cumulative += _w
+                                if _r < _cumulative:
+                                    chosen = _cand
+                                    break
+                        else:
+                            chosen = int(self.np_random.choice(candidates))
+                    else:
+                        chosen = 0
 
                 if chosen > 0:
                     ab = C.ABILITY_FRAMES[chosen]

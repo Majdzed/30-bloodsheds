@@ -19,6 +19,7 @@ import numpy as np
 
 from boss_env import constants as C
 from boss_env.env import BossFightEnv, Action
+from boss_env.adaptation import PlayerModel, LEARN_UNTIL_FIGHT
 from boss_env.renderer import Renderer
 from observe import find_latest_model
 from agents.rule_based import RuleBasedAgent
@@ -132,9 +133,35 @@ def main():
     parser.add_argument("--skip-menu", action="store_true", help="Start directly in combat mode")
     parser.add_argument("--mode", type=str, default="player", choices=["player", "agent"],
                         help="Initial combat mode: player or agent")
+    parser.add_argument("--no-adapt", action="store_true",
+                        help="Disable adaptive boss (boss does not learn from player)")
     args = parser.parse_args()
 
     renderer = Renderer()
+
+    # ---- Adaptive boss PlayerModel (persists across fights / retries) ----
+    _MODEL_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "player_model.json")
+    player_model = PlayerModel()
+    if not args.no_adapt and os.path.exists(_MODEL_JSON_PATH):
+        try:
+            with open(_MODEL_JSON_PATH, "r", encoding="utf-8") as _f:
+                player_model = PlayerModel.from_json(_f.read())
+            print(f"[Adaptive Boss] Loaded player model ({player_model.total_samples} samples)")
+        except Exception as _e:
+            print(f"[Adaptive Boss] Could not load model: {_e} – starting fresh")
+            player_model = PlayerModel()
+    _adapt_enabled = not args.no_adapt
+
+    def _save_player_model():
+        """Persist the player model to JSON next to play.py."""
+        if not _adapt_enabled:
+            return
+        try:
+            with open(_MODEL_JSON_PATH, "w", encoding="utf-8") as _f:
+                _f.write(player_model.to_json())
+        except Exception as _e:
+            print(f"[Adaptive Boss] Could not save model: {_e}")
 
     # State variables
     state = GameState.PLAYING if args.skip_menu else GameState.MAIN_MENU
@@ -174,6 +201,10 @@ def main():
     def init_battle(weapon_name: str, fight_idx: int):
         nonlocal env, agent, obs, fight_start_time, boss_start_hp
         env = BossFightEnv(weapon=weapon_name, fight=fight_idx, upgrade=upgrade_path, frame_skip=1)
+        # Attach adaptive model only for human (player) mode
+        if _adapt_enabled and active_mode == "player":
+            player_model.set_fight(fight_idx)
+            env.set_player_model(player_model)
         obs, _ = env.reset()
         fight_start_time = time.time()
         boss_start_hp = float(env.boss.hp)
@@ -523,6 +554,9 @@ def main():
                     "max_hearts": env.player.max_hearts,
                 }
 
+                # Persist adaptive model after each fight
+                _save_player_model()
+
                 if info.get("win", False):
                     state = GameState.VICTORY
                     selected_victory_btn = 0
@@ -545,6 +579,16 @@ def main():
                 selected_btn=selected_victory_btn,
                 mouse_pos=mouse_pos,
             )
+
+    _save_player_model()
+    if _adapt_enabled:
+        print(f"[Adaptive Boss] Model saved ({player_model.total_samples} samples, "
+              f"alpha={player_model.alpha:.2f})")
+        tend = player_model.tendencies()
+        top = sorted(tend.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        print("[Adaptive Boss] Your top tendencies:")
+        for r, rate in top:
+            print(f"  {r:14s}: {rate*100:.0f}%")
 
     renderer.close()
 
