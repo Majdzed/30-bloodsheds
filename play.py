@@ -132,6 +132,7 @@ def main():
     parser.add_argument("--upgrade", type=str, default="health", choices=["health", "flask"])
     parser.add_argument("--skip-menu", action="store_true", help="Start directly in combat mode")
     parser.add_argument("--mode", type=str, default="player", choices=["player", "agent"],
+                        help="Mode: player or agent")
     parser.add_argument("--boss-mode", type=str, default="human", choices=["human", "benchmark"],
                         help="Boss behavior mode: human (adaptation + dodge) or benchmark (scripted)")
     parser.add_argument("--no-adapt", action="store_true",
