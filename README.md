@@ -1,8 +1,7 @@
 # 30 Bloodsheds: Boss Gauntlet RL
 
-**Course:** Reinforcement Learning and Optimal Control (2026/2027)  
-**Program:** 3CS – Artificial Intelligence & Data Science  
-**Instructors:** N. Farhi & M. Bouali  
+
+ 
 **Project:** Development of a Game-Based Environment for Reinforcement Learning  
 
 ---
