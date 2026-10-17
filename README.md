@@ -252,8 +252,8 @@ This inductive bias separates self-kinematics from opponent state and arena haza
 ## 9. Unified Boss Mode (Human vs. Benchmark)
 
 The boss operates under a unified mode switch: `boss_mode = "benchmark" | "human"`:
-- **`benchmark`** *(Default for RL)*: The deterministic, frozen, scripted gauntlet. Used exclusively by `train.py`, `test.py`, and `observe.py` to ensure valid baseline comparisons and reproducible benchmark metrics.
-- **`human`** *(Default for `play.py`)*: Activates dynamic combat intelligence tailored for human players, combining **Markov-style player adaptation** and reactive **Boss Dodge**.
+- **`benchmark`** *(Default for RL)*: The deterministic, frozen, scripted gauntlet. Used exclusively by `train.py`, `test.py`, `observe.py`, and the in-game "Agent vs Boss" mode to ensure reproducible benchmark metrics.
+- **`human`** *(Always active in "Player vs Boss")*: Activates dynamic combat intelligence tailored for human players, combining **Markov-style player adaptation** and reactive **Boss Dodge**.
 
 ---
 
@@ -278,17 +278,16 @@ Starting at **Fight 10**, the boss gains an evasive maneuver when human attacks 
 
 ---
 
-### 9.3 CLI Usage
+### 9.3 How to Play
+
+In the main menu, selecting **1. PLAYER VS BOSS** automatically enables human mode (Markov adaptation + Boss Dodge). Selecting **2. AGENT VS BOSS** runs the scripted benchmark boss.
 
 ```bash
-# Play with full human mode (Adaptation + Dodge active by default)
+# Launch interactive menu or direct player combat (Adaptation + Dodge active)
 uv run python play.py --weapon katana --fight 10
 
-# Play in benchmark mode (scripted boss, same as RL training)
-uv run python play.py --boss-mode benchmark --weapon katana --fight 10
-
-# Disable adaptation while keeping dodge (or vice-versa)
-uv run python play.py --no-adapt --weapon katana --fight 10
+# Launch directly into Agent vs Boss mode (scripted benchmark boss)
+uv run python play.py --mode agent --weapon katana --fight 10
 ```
 
 > **Strict Benchmark Invariance:** `boss_mode="benchmark"` guarantees identical RNG consumption, state transitions, and step speed to the original environment. Observation space shape remains strictly 52 floats.

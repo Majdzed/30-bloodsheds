@@ -267,13 +267,13 @@ These are printed to the console on exit and can be shown in the post-fight HUD.
 
 ## 10. Boss Dodge & Unified Boss Mode (Human Mode Only)
 
-> **Scope:** The Boss Dodge ability is part of the unified `boss_mode = "human"` setting.  It is active **only** in `play.py` during player mode (default).  `train.py`, `test.py`, and `observe.py` always use `boss_mode = "benchmark"`, keeping the benchmark MDP completely untouched.
+> **Scope:** The Boss Dodge ability is part of the unified `boss_mode = "human"` setting. It is active **always** in `play.py` during "Player vs Boss" mode. "Agent vs Boss" mode as well as `train.py`, `test.py`, and `observe.py` always use `boss_mode = "benchmark"`, keeping the benchmark MDP completely untouched.
 
 ### 10.1 Unified Boss Mode
 
 Instead of fragmented toggles, `BossFightEnv` exposes:
-- `boss_mode = "benchmark"` (default): The strict, scripted, frozen gauntlet that RL agents train on and are evaluated against.
-- `boss_mode = "human"`: Enables both the online Markov adaptive player model (§9) and the evasive Boss Dodge (§10).
+- `boss_mode = "benchmark"` (default): The strict, scripted, frozen gauntlet that RL agents train on and are evaluated against. Also used by "Agent vs Boss" mode in `play.py`.
+- `boss_mode = "human"`: Always active during "Player vs Boss" mode in `play.py`. Enables both the online Markov adaptive player model (§9) and the evasive Boss Dodge (§10).
 
 ### 10.2 Dodge Trigger & Scaling Rules
 
