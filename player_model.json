@@ -1,6 +1,6 @@
 {
-  "total_samples": 61,
-  "current_fight": 8,
+  "total_samples": 65,
+  "current_fight": 1,
   "counts": {
     "1|far": {
       "roll": 0,
@@ -9,13 +9,13 @@
       "attack": 0,
       "move_toward": 5,
       "move_away": 0,
-      "idle": 0
+      "idle": 2
     },
     "1|close": {
       "roll": 0,
       "jump": 0,
       "parry": 5,
-      "attack": 14,
+      "attack": 16,
       "move_toward": 5,
       "move_away": 0,
       "idle": 6
