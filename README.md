@@ -287,6 +287,8 @@ uv run python play.py --weapon katana --fight 10
 
 # Launch directly into Agent vs Boss mode (scripted benchmark boss)
 uv run python play.py --mode agent --weapon katana --fight 10
+#launch with main menu
+uv run python play.py
 ```
 
 > **Strict Benchmark Invariance:** `boss_mode="benchmark"` guarantees identical RNG consumption, state transitions, and step speed to the original environment. Observation space shape remains strictly 52 floats.
